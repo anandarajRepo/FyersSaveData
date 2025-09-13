@@ -3,13 +3,21 @@ import json
 import logging
 import threading
 import time
+import os
+import hashlib
+import requests
+import getpass
+import sys
 from datetime import datetime, timedelta
 import queue
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 import pandas as pd
-import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +28,220 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+logger = logging.getLogger(__name__)
+
+
+class FyersAuthManager:
+    """Enhanced Fyers authentication manager with refresh token and PIN support"""
+
+    def __init__(self):
+        self.client_id = os.environ.get('FYERS_CLIENT_ID')
+        self.secret_key = os.environ.get('FYERS_SECRET_KEY')
+        self.redirect_uri = os.environ.get('FYERS_REDIRECT_URI', "https://trade.fyers.in/api-login/redirect-to-app")
+        self.refresh_token = os.environ.get('FYERS_REFRESH_TOKEN')
+        self.access_token = os.environ.get('FYERS_ACCESS_TOKEN')
+        self.pin = os.environ.get('FYERS_PIN')
+
+    def save_to_env(self, key: str, value: str) -> None:
+        """Save or update environment variable in .env file"""
+        env_file = '.env'
+
+        # Read existing .env file
+        env_vars = {}
+        if os.path.exists(env_file):
+            with open(env_file, 'r') as f:
+                for line in f:
+                    if '=' in line and not line.strip().startswith('#'):
+                        k, v = line.strip().split('=', 1)
+                        env_vars[k] = v
+
+        # Update the specific key
+        env_vars[key] = value
+
+        # Write back to .env file
+        with open(env_file, 'w') as f:
+            for k, v in env_vars.items():
+                f.write(f"{k}={v}\n")
+
+        # Update current environment
+        os.environ[key] = value
+
+    def _secure_input(self, prompt: str) -> str:
+        """Get secure input with fallback to regular input"""
+        try:
+            # Try getpass first (more secure)
+            return getpass.getpass(prompt).strip()
+        except Exception:
+            # Fallback to regular input if getpass fails
+            print("Warning: Input will be visible on screen")
+            return input(prompt.replace(":", " (visible): ")).strip()
+
+    def get_or_request_pin(self) -> str:
+        """Get PIN from environment or request from user"""
+        if self.pin:
+            return self.pin
+
+        print("\n=== PIN Required for Token Refresh ===")
+        print("Your trading PIN is required for security authentication.")
+
+        pin = self._secure_input("Enter your Fyers trading PIN: ")
+
+        if pin and pin.isdigit() and len(pin) >= 4:
+            self.save_to_env('FYERS_PIN', pin)
+            self.pin = pin
+            return pin
+        else:
+            raise ValueError("Valid PIN is required for authentication")
+
+    def get_app_id_hash(self) -> str:
+        """Generate app_id_hash for API calls"""
+        app_id = f"{self.client_id}:{self.secret_key}"
+        return hashlib.sha256(app_id.encode()).hexdigest()
+
+    def generate_access_token_with_refresh(self, refresh_token: str) -> Tuple[Optional[str], Optional[str]]:
+        """Generate new access token using refresh token with PIN verification"""
+        url = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
+
+        try:
+            pin = self.get_or_request_pin()
+        except ValueError as e:
+            logger.error(f"PIN error: {e}")
+            return None, None
+
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "grant_type": "refresh_token",
+            "appIdHash": self.get_app_id_hash(),
+            "refresh_token": refresh_token,
+            "pin": pin
+        }
+
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(data))
+            response_data = response.json()
+
+            if response_data.get('s') == 'ok' and 'access_token' in response_data:
+                logger.info("Successfully refreshed access token")
+                return response_data['access_token'], response_data.get('refresh_token')
+            else:
+                error_msg = response_data.get('message', 'Unknown error')
+                logger.error(f"Error refreshing token: {error_msg}")
+                return None, None
+
+        except Exception as e:
+            logger.error(f"Error while refreshing token: {e}")
+            return None, None
+
+    def get_tokens_from_auth_code(self, auth_code: str) -> Tuple[Optional[str], Optional[str]]:
+        """Get both access and refresh tokens from auth code"""
+        url = "https://api-t1.fyers.in/api/v3/validate-authcode"
+
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "grant_type": "authorization_code",
+            "appIdHash": self.get_app_id_hash(),
+            "code": auth_code
+        }
+
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(data))
+            response_data = response.json()
+
+            if response_data.get('s') == 'ok':
+                return (response_data.get('access_token'), response_data.get('refresh_token'))
+            else:
+                logger.error(f"Error getting tokens: {response_data.get('message', 'Unknown error')}")
+                return None, None
+
+        except Exception as e:
+            logger.error(f"Exception while getting tokens: {e}")
+            return None, None
+
+    def is_token_valid(self, access_token: str) -> bool:
+        """Check if access token is still valid"""
+        if not access_token:
+            return False
+
+        try:
+            url = "https://api-t1.fyers.in/api/v3/profile"
+            headers = {'Authorization': f"{self.client_id}:{access_token}"}
+
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                result = response.json()
+                return result.get('s') == 'ok'
+            return False
+        except:
+            return False
+
+    def get_valid_access_token(self) -> Optional[str]:
+        """Get a valid access token, using refresh token if available"""
+        # First, check if current access token is still valid
+        if self.access_token and self.is_token_valid(self.access_token):
+            logger.info("Current access token is still valid")
+            return self.access_token
+
+        # Try to use refresh token if available
+        if self.refresh_token:
+            logger.info("Access token expired, trying to refresh...")
+            new_access_token, new_refresh_token = self.generate_access_token_with_refresh(self.refresh_token)
+
+            if new_access_token:
+                logger.info("Successfully refreshed access token")
+                self.save_to_env('FYERS_ACCESS_TOKEN', new_access_token)
+                self.access_token = new_access_token
+
+                if new_refresh_token:
+                    self.save_to_env('FYERS_REFRESH_TOKEN', new_refresh_token)
+                    self.refresh_token = new_refresh_token
+
+                return new_access_token
+
+        # If refresh failed or no refresh token, need manual authentication
+        logger.error("Need to run authentication setup")
+        return None
+
+    def generate_auth_url(self) -> str:
+        """Generate authorization URL"""
+        auth_url = "https://api-t1.fyers.in/api/v3/generate-authcode"
+        params = {
+            'client_id': self.client_id,
+            'redirect_uri': self.redirect_uri,
+            'response_type': 'code',
+            'state': 'sample_state'
+        }
+        return f"{auth_url}?" + "&".join([f"{k}={v}" for k, v in params.items()])
+
+    def setup_authentication(self) -> Optional[str]:
+        """Setup authentication interactively"""
+        print("\n=== Fyers API Authentication Setup ===")
+
+        if not all([self.client_id, self.secret_key]):
+            print("Missing CLIENT_ID or SECRET_KEY in environment variables")
+            return None
+
+        # Generate auth URL
+        auth_url = self.generate_auth_url()
+        print(f"\n1. Open this URL: {auth_url}")
+        print("2. Complete authorization and get the code")
+
+        auth_code = input("\nEnter authorization code: ").strip()
+
+        # Get tokens
+        access_token, refresh_token = self.get_tokens_from_auth_code(auth_code)
+
+        if access_token:
+            # Save tokens
+            self.save_to_env('FYERS_ACCESS_TOKEN', access_token)
+            if refresh_token:
+                self.save_to_env('FYERS_REFRESH_TOKEN', refresh_token)
+
+            print(f"\nAuthentication successful!")
+            return access_token
+        else:
+            print("Authentication failed!")
+            return None
 
 
 class FyersDataStreamerV3:
@@ -162,7 +384,6 @@ class FyersDataStreamerV3:
         """Handle incoming WebSocket messages from Fyers API v3"""
         try:
             self.stats['messages_received'] += 1
-            print(message)
 
             # Fyers API v3 message format
             if message:
@@ -172,7 +393,7 @@ class FyersDataStreamerV3:
                 # Add to queue for processing
                 self.data_queue.put(message)
 
-                if self.stats['messages_received'] % 1000 == 0:
+                if self.stats['messages_received'] % 100 == 0:
                     logging.info(f"Received {self.stats['messages_received']} messages")
 
         except Exception as e:
@@ -204,18 +425,15 @@ class FyersDataStreamerV3:
 
         while self.running:
             try:
-                # Get data from queue with timeout
                 try:
                     data = self.data_queue.get(timeout=1)
                     batch_data.append(data)
                 except queue.Empty:
-                    # Process any remaining data in batch
                     if batch_data:
                         self.save_batch_to_db(batch_data)
                         batch_data = []
                     continue
 
-                # Process batch when it reaches batch_size
                 if len(batch_data) >= batch_size:
                     self.save_batch_to_db(batch_data)
                     batch_data = []
@@ -224,7 +442,6 @@ class FyersDataStreamerV3:
                 logging.error(f"Error in data processing thread: {e}")
                 self.stats['errors'] += 1
 
-        # Process any remaining data
         if batch_data:
             self.save_batch_to_db(batch_data)
 
@@ -236,13 +453,11 @@ class FyersDataStreamerV3:
 
             for data in batch_data:
                 try:
-                    # Determine data type and save accordingly
                     if 'symbol' in data and 'ltp' in data:
                         self.save_market_data(cursor, data)
                     elif 'bids' in data and 'asks' in data:
                         self.save_depth_data(cursor, data)
                     else:
-                        # Save as generic market data
                         self.save_market_data(cursor, data)
 
                     self.stats['messages_saved'] += 1
@@ -305,11 +520,9 @@ class FyersDataStreamerV3:
         """Save market depth data to database"""
         timestamp = data.get('processing_timestamp', datetime.now().isoformat())
 
-        # Extract bid and ask data
         bids = data.get('bids', [])
         asks = data.get('asks', [])
 
-        # Pad with None if less than 5 levels
         while len(bids) < 5:
             bids.append({'price': None, 'qty': None})
         while len(asks) < 5:
@@ -341,94 +554,43 @@ class FyersDataStreamerV3:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', record)
 
-    def get_symbols_info(self, symbols: List[str]) -> Dict:
-        """Get symbol information using Fyers API v3"""
-        try:
-            # Get symbol master data
-            symbol_info = {}
-            for symbol in symbols:
-                try:
-                    # Extract exchange and symbol
-                    parts = symbol.split(':')
-                    if len(parts) == 2:
-                        exchange = parts[0]
-                        symbol_name = parts[1]
-
-                        # You can enhance this with actual API calls to get token info
-                        symbol_info[symbol] = {
-                            'symbol': symbol,
-                            'exchange': exchange,
-                            'symbol_name': symbol_name,
-                            'token': hash(symbol) % 1000000  # Placeholder - use actual token from API
-                        }
-
-                except Exception as e:
-                    logging.error(f"Error getting info for symbol {symbol}: {e}")
-
-            return symbol_info
-
-        except Exception as e:
-            logging.error(f"Error getting symbols info: {e}")
-            return {}
-
     def start_streaming(self, symbols: List[str], data_type: str = "SymbolUpdate"):
-        """
-        Start streaming data for given symbols using Fyers API v3
-
-        Args:
-            symbols: List of symbols to stream (e.g., ['NSE:SBIN-EQ', 'NSE:RELIANCE-EQ'])
-            data_type: Type of data to stream (SymbolUpdate, MarketDepth, etc.)
-        """
+        """Start streaming data for given symbols using Fyers API v3"""
         try:
             self.running = True
             self.stats['start_time'] = datetime.now()
 
-            # Get symbol information
-            self.symbol_mapping = self.get_symbols_info(symbols)
-
-            # Create session record
             session_id = f"session_v3_{int(time.time())}"
             self.create_session_record(session_id, symbols)
 
-            # Start data processing thread
             processing_thread = threading.Thread(target=self.process_data_queue, daemon=True)
             processing_thread.start()
             logging.info("Data processing thread started")
 
-            # Initialize WebSocket connection for API v3
             self.websocket = data_ws.FyersDataSocket(
                 access_token=self.access_token,
                 log_path="",
                 litemode=False,
                 write_to_file=False,
-                reconnect=True,  # Enable auto-reconnection to WebSocket on disconnection.
-                reconnect_retry=10,  # Number of times re-connection will be attempted in case
+                reconnect=True,
+                reconnect_retry=10,
                 on_connect=self.on_open,
                 on_close=self.on_close,
                 on_error=self.on_error,
                 on_message=self.on_message
             )
 
-            # Start connection in background thread
             self._start_connection_thread()
 
-            # Wait for connection
             while not self.is_connected:
                 time.sleep(0.1)
 
-            # Subscribe to symbols
             self.websocket.subscribe(symbols=symbols, data_type=data_type)
             logging.info(f"Subscribed to {len(symbols)} symbols: {symbols}")
 
-            # Start the connection
             self.websocket.keep_running()
 
-            if self.is_connected:
-                logging.info("Fyers WebSocket connected successfully")
-                return True
-            else:
-                logging.error("Fyers WebSocket connection timeout")
-                return False
+            return self.is_connected
 
         except Exception as e:
             logging.error(f"Error starting streaming: {e}")
@@ -473,50 +635,25 @@ class FyersDataStreamerV3:
         if self.websocket:
             self.websocket.close_connection()
 
-        # Print final statistics
         duration = datetime.now() - self.stats['start_time'] if self.stats['start_time'] else timedelta(0)
         logging.info(f"Streaming stopped. Statistics:")
         logging.info(f"  Duration: {duration}")
         logging.info(f"  Messages received: {self.stats['messages_received']}")
         logging.info(f"  Messages saved: {self.stats['messages_saved']}")
         logging.info(f"  Errors: {self.stats['errors']}")
-        logging.info(f"  Connection status: {self.stats['connection_status']}")
 
-    def get_historical_data(self, symbol: str, start_date: str, end_date: str, include_depth: bool = False) -> pd.DataFrame:
-        """
-        Retrieve historical data from database
-
-        Args:
-            symbol: Symbol to query
-            start_date: Start date (YYYY-MM-DD HH:MM:SS)
-            end_date: End date (YYYY-MM-DD HH:MM:SS)
-            include_depth: Whether to include market depth data
-
-        Returns:
-            DataFrame with historical data
-        """
+    def get_historical_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Retrieve historical data from database"""
         try:
             conn = sqlite3.connect(self.db_path)
 
-            if include_depth:
-                # Join market data with depth data
-                df = pd.read_sql_query('''
-                    SELECT m.timestamp, m.symbol, m.ltp, m.open_price, m.high_price, m.low_price, 
-                           m.close_price, m.volume, m.bid_price, m.ask_price, m.price_change, m.price_change_percent,
-                           d.bid_1_price, d.bid_1_qty, d.ask_1_price, d.ask_1_qty
-                    FROM market_data m
-                    LEFT JOIN market_depth d ON m.symbol = d.symbol AND m.timestamp = d.timestamp
-                    WHERE m.symbol = ? AND m.timestamp BETWEEN ? AND ?
-                    ORDER BY m.timestamp
-                ''', conn, params=(symbol, start_date, end_date))
-            else:
-                df = pd.read_sql_query('''
-                    SELECT timestamp, symbol, ltp, open_price, high_price, low_price, close_price,
-                           volume, bid_price, ask_price, price_change, price_change_percent, oi, oi_change
-                    FROM market_data
-                    WHERE symbol = ? AND timestamp BETWEEN ? AND ?
-                    ORDER BY timestamp
-                ''', conn, params=(symbol, start_date, end_date))
+            df = pd.read_sql_query('''
+                SELECT timestamp, symbol, ltp, open_price, high_price, low_price, close_price,
+                       volume, bid_price, ask_price, price_change, price_change_percent
+                FROM market_data
+                WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+                ORDER BY timestamp
+            ''', conn, params=(symbol, start_date, end_date))
 
             conn.close()
 
@@ -530,44 +667,84 @@ class FyersDataStreamerV3:
             logging.error(f"Error retrieving historical data: {e}")
             return pd.DataFrame()
 
-    def get_stats(self) -> Dict:
-        """Get current streaming statistics"""
-        stats = self.stats.copy()
-        if stats['start_time']:
-            stats['duration_minutes'] = (datetime.now() - stats['start_time']).total_seconds() / 60
-            if stats['duration_minutes'] > 0:
-                stats['messages_per_minute'] = stats['messages_received'] / stats['duration_minutes']
-        return stats
+
+def setup_authentication():
+    """Setup Fyers authentication with enhanced features"""
+    print("=== Fyers API Authentication Setup ===")
+
+    # Check existing credentials
+    if not os.environ.get('FYERS_CLIENT_ID'):
+        client_id = input("Enter Fyers Client ID: ").strip()
+        secret_key = input("Enter Fyers Secret Key: ").strip()
+
+        # Save to .env file
+        auth_manager = FyersAuthManager()
+        auth_manager.save_to_env('FYERS_CLIENT_ID', client_id)
+        auth_manager.save_to_env('FYERS_SECRET_KEY', secret_key)
+
+        # Reload environment
+        os.environ['FYERS_CLIENT_ID'] = client_id
+        os.environ['FYERS_SECRET_KEY'] = secret_key
+
+    auth_manager = FyersAuthManager()
+    access_token = auth_manager.setup_authentication()
+
+    if access_token:
+        print("Authentication setup completed successfully!")
+        return True
+    else:
+        print("Authentication setup failed!")
+        return False
 
 
 def main():
-    """Main function to run the streaming application with Fyers API v3"""
+    """Main function with enhanced authentication"""
 
-    # Configuration - Replace with your actual credentials
-    CLIENT_ID = "X23KTOMB05-100"  # Replace with your Fyers client ID
-    ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsiZDoxIiwiZDoyIiwieDowIiwieDoxIiwieDoyIl0sImF0X2hhc2giOiJnQUFBQUFCb3c2V1otWHZQdGRDQU9mMkdPYzMxUVlCZFhmSE9CN055QW5JR0NLdERuU2JWeExUY3dGd181X2l2ZUlheHNRZXZHa3FGZ09MakZ5Vk9ibzJnTVNZLXRxNWw3MFJFV2ZocGctVnVWb1lxc2sySzZfWT0iLCJkaXNwbGF5X25hbWUiOiIiLCJvbXMiOiJLMSIsImhzbV9rZXkiOiI3MzhmOGJiZDdhNmE3MDQ5ZDgxZWQzMTEwM2M4MTg5OTQ0NjAzNDFlOWNhYzdmOGE3ZWNhMTk2NiIsImlzRGRwaUVuYWJsZWQiOiJOIiwiaXNNdGZFbmFibGVkIjoiTiIsImZ5X2lkIjoiREcwMDAxMyIsImFwcFR5cGUiOjEwMCwiZXhwIjoxNzU3NzIzNDAwLCJpYXQiOjE3NTc2NTIzNzcsImlzcyI6ImFwaS5meWVycy5pbiIsIm5iZiI6MTc1NzY1MjM3Nywic3ViIjoiYWNjZXNzX3Rva2VuIn0.q48U9Neue78iVz6nSywMQfcFJQcDM3MYFruiZ4F1MCs"  # Replace with your Fyers API v3 access token
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
 
-    # Symbols to stream (adjust as needed)
-    SYMBOLS = [
-        "NSE:SBIN-EQ",  # State Bank of India
-        "NSE:RELIANCE-EQ",  # Reliance Industries
-        "NSE:TCS-EQ",  # Tata Consultancy Services
-        "NSE:INFY-EQ",  # Infosys
-        "NSE:HDFCBANK-EQ"  # HDFC Bank
-    ]
+        if command == "auth":
+            setup_authentication()
+            return
+        elif command == "test-auth":
+            auth_manager = FyersAuthManager()
+            token = auth_manager.get_valid_access_token()
+            if token:
+                print("Authentication test successful!")
+            else:
+                print("Authentication test failed!")
+            return
 
-    # Database path
-    DB_PATH = "fyers_market_data_v3.db"
-
+    # Main streaming logic
     try:
-        # Initialize streamer with API v3
-        streamer = FyersDataStreamerV3(CLIENT_ID, ACCESS_TOKEN, DB_PATH)
+        # Enhanced authentication
+        auth_manager = FyersAuthManager()
+        access_token = auth_manager.get_valid_access_token()
 
-        logging.info("Starting Fyers API v3 data streaming...")
+        if not access_token:
+            print("Authentication failed. Please run: python script.py auth")
+            return
+
+        CLIENT_ID = os.environ.get('FYERS_CLIENT_ID')
+
+        # Symbols to stream
+        SYMBOLS = [
+            "NSE:SBIN-EQ",
+            "NSE:RELIANCE-EQ",
+            "NSE:TCS-EQ",
+            "NSE:INFY-EQ",
+            "NSE:HDFCBANK-EQ"
+        ]
+
+        DB_PATH = "fyers_market_data_v3.db"
+
+        # Initialize and run streamer
+        streamer = FyersDataStreamerV3(CLIENT_ID, access_token, DB_PATH)
+
+        logging.info("Starting Fyers API v3 data streaming with enhanced authentication...")
         logging.info(f"Symbols: {SYMBOLS}")
         logging.info(f"Database: {DB_PATH}")
 
-        # Start streaming with SymbolUpdate for real-time quotes
         streamer.start_streaming(SYMBOLS, data_type="SymbolUpdate")
 
     except KeyboardInterrupt:
@@ -582,4 +759,48 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print("Fyers Data Streaming with Enhanced Authentication")
+        print("=" * 50)
+        print("1. Setup Authentication")
+        print("2. Test Authentication")
+        print("3. Start Streaming")
+        print("4. Exit")
+
+        choice = input("\nSelect option (1-4): ").strip()
+
+        if choice == "1":
+            setup_authentication()
+        elif choice == "2":
+            auth_manager = FyersAuthManager()
+            token = auth_manager.get_valid_access_token()
+            if token:
+                print("✅ Authentication test successful!")
+
+                # Test API call
+                try:
+                    headers = {'Authorization': f"{os.environ.get('FYERS_CLIENT_ID')}:{token}"}
+                    response = requests.get('https://api-t1.fyers.in/api/v3/profile', headers=headers)
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('s') == 'ok':
+                            profile = result.get('data', {})
+                            print(f"Profile: {profile.get('name', 'Unknown')}")
+                            print(f"Email: {profile.get('email', 'Unknown')}")
+                        else:
+                            print(f"API Error: {result.get('message')}")
+                    else:
+                        print(f"HTTP Error: {response.status_code}")
+                except Exception as e:
+                    print(f"API test error: {e}")
+            else:
+                print("❌ Authentication test failed!")
+        elif choice == "3":
+            main()
+        elif choice == "4":
+            print("Goodbye!")
+        else:
+            print("Invalid choice")
+    else:
+        main()

@@ -1,0 +1,64 @@
+# Fyers API v3 Data Streaming Requirements
+# Production-tested dependency versions
+
+# Core Fyers API (Primary dependency)
+fyers-apiv3>=3.0.8
+
+# Data Processing and Analysis
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Environment and Configuration
+python-dotenv>=1.0.0
+
+# HTTP Requests for Authentication
+requests>=2.31.0
+
+# Date and Time Handling
+pytz>=2023.3
+
+# Database (SQLite is built-in to Python, but these enhance functionality)
+# SQLite comes with Python standard library
+
+# Optional: Enhanced SQLite performance
+# Uncomment if you need better SQLite performance
+# pysqlite3>=0.5.0
+
+# Security and Hashing (for token management)
+# hashlib is built-in to Python
+
+# Threading and Async Support (built-in modules)
+# threading, queue, asyncio are built-in
+
+# JSON handling (built-in)
+# json module is built-in
+
+# System utilities (optional but recommended for production)
+psutil>=5.9.0
+
+# Logging enhancements (optional)
+# logging is built-in, but these can enhance it
+colorlog>=6.7.0
+
+# Development and Testing Dependencies (optional)
+# Uncomment for development environment
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0
+
+# Production Monitoring (optional)
+# Uncomment for production deployment
+# prometheus-client>=0.17.0
+# watchdog>=3.0.0
+
+# Backup and Compression (optional)
+# Uncomment if you want automated backup features
+# schedule>=1.2.0
+
+# Note: The following are intentionally minimal dependencies
+# - websocket-client: Automatically installed by fyers-apiv3
+# - sqlite3: Built into Python standard library
+# - datetime, time: Built into Python standard library
+# - os, sys: Built into Python standard library
+# - typing: Built into Python 3.5+
