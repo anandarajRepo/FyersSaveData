@@ -68,31 +68,76 @@ class FyersAuthManager:
         os.environ[key] = value
 
     def _secure_input(self, prompt: str) -> str:
-        """Get secure input with fallback to regular input"""
+        """Get secure input with multiple fallback methods"""
+        # Method 1: Try getpass (hidden input) only in proper terminals
         try:
-            # Try getpass first (more secure)
-            return getpass.getpass(prompt).strip()
-        except Exception:
-            # Fallback to regular input if getpass fails
-            print("Warning: Input will be visible on screen")
-            return input(prompt.replace(":", " (visible): ")).strip()
+            # Check if we're in an interactive terminal and not in IDE/notebook
+            if (sys.stdin.isatty() and
+                    not any(env in os.environ for env in ['JUPYTER_RUNTIME_DIR', 'VSCODE_PID', 'PYCHARM_HOSTED']) and
+                    os.environ.get('TERM_PROGRAM') != 'vscode'):
+                return getpass.getpass(prompt).strip()
+        except Exception as e:
+            print(f"Secure input method failed: {e}")
+
+        # Method 2: Fallback to regular input with clear warning
+        print(" Note: PIN will be visible on screen (secure input not available in this environment)")
+        return input(prompt.replace(":", " (visible): ")).strip()
+
+    def _simple_input(self, prompt: str) -> str:
+        """Simple visible input method"""
+        print(" Using simple input mode")
+        return input(prompt).strip()
 
     def get_or_request_pin(self) -> str:
-        """Get PIN from environment or request from user"""
+        """Get PIN from environment or request from user with better input handling"""
         if self.pin:
             return self.pin
 
-        print("\n=== PIN Required for Token Refresh ===")
+        print("\n" + "=" * 50)
+        print("PIN REQUIRED FOR TOKEN REFRESH")
+        print("=" * 50)
         print("Your trading PIN is required for security authentication.")
+        print("This PIN will be saved in your .env file for future use.")
 
-        pin = self._secure_input("Enter your Fyers trading PIN: ")
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            print(f"\nAttempt {attempt + 1}/{max_attempts}")
 
-        if pin and pin.isdigit() and len(pin) >= 4:
-            self.save_to_env('FYERS_PIN', pin)
-            self.pin = pin
-            return pin
-        else:
-            raise ValueError("Valid PIN is required for authentication")
+            # Give user choice of input method
+            print("\nChoose input method:")
+            print("1. Secure input (PIN hidden) - Recommended")
+            print("2. Simple input (PIN visible) - If option 1 doesn't work")
+
+            choice = input("Select method (1/2) [default: 1]: ").strip()
+
+            if choice == "2":
+                pin = self._simple_input("Enter your Fyers trading PIN: ")
+            else:
+                pin = self._secure_input("Enter your Fyers trading PIN: ")
+
+            if pin:
+                # Basic validation
+                if not pin.isdigit():
+                    print(" PIN must contain only numbers")
+                    continue
+
+                if len(pin) < 4:
+                    print(" PIN must be at least 4 digits")
+                    continue
+
+                # Save PIN to environment for future use
+                try:
+                    self.save_to_env('FYERS_PIN', pin)
+                    self.pin = pin
+                    print(" PIN saved successfully!")
+                    return pin
+                except Exception as e:
+                    print(f" Error saving PIN: {e}")
+                    continue
+            else:
+                print(" PIN cannot be empty")
+
+        raise ValueError("PIN is required for authentication - max attempts exceeded")
 
     def get_app_id_hash(self) -> str:
         """Generate app_id_hash for API calls"""
@@ -126,6 +171,21 @@ class FyersAuthManager:
                 return response_data['access_token'], response_data.get('refresh_token')
             else:
                 error_msg = response_data.get('message', 'Unknown error')
+
+                # Handle PIN-specific errors
+                if 'pin' in error_msg.lower() or 'invalid pin' in error_msg.lower():
+                    print(f"\n PIN Error: {error_msg}")
+                    print("The saved PIN might be incorrect.")
+
+                    # Clear saved PIN and retry
+                    self.pin = None
+                    if 'FYERS_PIN' in os.environ:
+                        del os.environ['FYERS_PIN']
+
+                    retry = input("Would you like to retry with a new PIN? (y/n): ").strip().lower()
+                    if retry == 'y':
+                        return self.generate_access_token_with_refresh(refresh_token)
+
                 logger.error(f"Error refreshing token: {error_msg}")
                 return None, None
 
@@ -215,19 +275,30 @@ class FyersAuthManager:
 
     def setup_authentication(self) -> Optional[str]:
         """Setup authentication interactively"""
-        print("\n=== Fyers API Authentication Setup ===")
+        print("\n" + "=" * 60)
+        print(" FYERS API AUTHENTICATION SETUP")
+        print("=" * 60)
 
         if not all([self.client_id, self.secret_key]):
-            print("Missing CLIENT_ID or SECRET_KEY in environment variables")
+            print(" Missing CLIENT_ID or SECRET_KEY in environment variables")
             return None
 
         # Generate auth URL
         auth_url = self.generate_auth_url()
-        print(f"\n1. Open this URL: {auth_url}")
-        print("2. Complete authorization and get the code")
+        print(f"\n STEPS TO COMPLETE AUTHENTICATION:")
+        print(f"  Copy and open this URL in your browser:")
+        print(f"    {auth_url}")
+        print(f"\n  Complete the login process on Fyers website")
+        print(f"  Copy the authorization code from the redirect URL")
 
-        auth_code = input("\nEnter authorization code: ").strip()
+        print(f"\n" + "-" * 60)
+        auth_code = input(" Enter authorization code: ").strip()
 
+        if not auth_code:
+            print(" No authorization code provided")
+            return None
+
+        print(f"\n Processing authentication...")
         # Get tokens
         access_token, refresh_token = self.get_tokens_from_auth_code(auth_code)
 
@@ -237,10 +308,16 @@ class FyersAuthManager:
             if refresh_token:
                 self.save_to_env('FYERS_REFRESH_TOKEN', refresh_token)
 
-            print(f"\nAuthentication successful!")
+            print(f"\n" + "=" * 60)
+            print(f" AUTHENTICATION SUCCESSFUL!")
+            print(f"=" * 60)
+            print(f" Access Token: {access_token[:20]}...")
+            if refresh_token:
+                print(f" Refresh Token: {refresh_token[:20]}...")
+            print(f" Tokens saved to .env file")
             return access_token
         else:
-            print("Authentication failed!")
+            print(f"\n Authentication failed!")
             return None
 
 
@@ -670,12 +747,19 @@ class FyersDataStreamerV3:
 
 def setup_authentication():
     """Setup Fyers authentication with enhanced features"""
-    print("=== Fyers API Authentication Setup ===")
+    print("\n" + "=" * 60)
+    print("️  FYERS API AUTHENTICATION SETUP")
+    print("=" * 60)
 
     # Check existing credentials
     if not os.environ.get('FYERS_CLIENT_ID'):
-        client_id = input("Enter Fyers Client ID: ").strip()
-        secret_key = input("Enter Fyers Secret Key: ").strip()
+        print("\n Enter your Fyers API credentials:")
+        client_id = input("Fyers Client ID: ").strip()
+        secret_key = input("Fyers Secret Key: ").strip()
+
+        if not client_id or not secret_key:
+            print(" Both Client ID and Secret Key are required!")
+            return False
 
         # Save to .env file
         auth_manager = FyersAuthManager()
@@ -685,21 +769,162 @@ def setup_authentication():
         # Reload environment
         os.environ['FYERS_CLIENT_ID'] = client_id
         os.environ['FYERS_SECRET_KEY'] = secret_key
+        print(" Credentials saved to .env file")
 
     auth_manager = FyersAuthManager()
     access_token = auth_manager.setup_authentication()
 
     if access_token:
-        print("Authentication setup completed successfully!")
+        print("\n Authentication setup completed successfully!")
         return True
     else:
-        print("Authentication setup failed!")
+        print("\n Authentication setup failed!")
         return False
 
 
-def main():
-    """Main function with enhanced authentication"""
+def test_authentication():
+    """Test authentication and API connectivity"""
+    print("\n" + "=" * 60)
+    print(" TESTING FYERS API AUTHENTICATION")
+    print("=" * 60)
 
+    auth_manager = FyersAuthManager()
+    token = auth_manager.get_valid_access_token()
+
+    if token:
+        print(" Authentication successful!")
+        print(f" Access Token: {token[:20]}...")
+
+        # Test API call
+        try:
+            print("\n Testing API connectivity...")
+            headers = {'Authorization': f"{os.environ.get('FYERS_CLIENT_ID')}:{token}"}
+            response = requests.get('https://api-t1.fyers.in/api/v3/profile', headers=headers)
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('s') == 'ok':
+                    profile = result.get('data', {})
+                    print(" API Connection successful!")
+                    print(f" Name: {profile.get('name', 'Unknown')}")
+                    print(f" Email: {profile.get('email', 'Unknown')}")
+                    print(f" User ID: {profile.get('id', 'Unknown')}")
+                    return True
+                else:
+                    print(f" API Error: {result.get('message')}")
+            else:
+                print(f" HTTP Error: {response.status_code}")
+        except Exception as e:
+            print(f" API test error: {e}")
+
+    else:
+        print(" Authentication failed!")
+        print(" Try running: python main.py auth")
+
+    return False
+
+
+def show_menu():
+    """Display the main menu"""
+    print("\n" + "=" * 60)
+    print(" FYERS DATA STREAMING - ENHANCED VERSION")
+    print("=" * 60)
+    print("1. Setup Authentication")
+    print("2. Test Authentication")
+    print("3. Start Data Streaming")
+    print("4. View Streaming Stats")
+    print("5. Update PIN")
+    print("6. Exit")
+    print("=" * 60)
+
+
+def show_streaming_stats():
+    """Show current streaming statistics"""
+    db_path = "fyers_market_data.db"
+
+    if not os.path.exists(db_path):
+        print(" No database found. Start streaming first.")
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # Get session stats
+        sessions_df = pd.read_sql_query('''
+            SELECT session_id, start_time, symbols_count, messages_received, messages_saved, status
+            FROM streaming_sessions 
+            ORDER BY start_time DESC 
+            LIMIT 5
+        ''', conn)
+
+        # Get data stats
+        data_stats = pd.read_sql_query('''
+            SELECT 
+                symbol,
+                COUNT(*) as tick_count,
+                MIN(timestamp) as first_tick,
+                MAX(timestamp) as last_tick,
+                AVG(volume) as avg_volume
+            FROM market_data 
+            GROUP BY symbol
+            ORDER BY tick_count DESC
+        ''', conn)
+
+        conn.close()
+
+        print("\n" + "=" * 60)
+        print(" STREAMING STATISTICS")
+        print("=" * 60)
+
+        if not sessions_df.empty:
+            print("\n Recent Sessions:")
+            for _, session in sessions_df.iterrows():
+                print(f"   {session['start_time'][:19]} | "
+                      f"Symbols: {session['symbols_count']} | "
+                      f"Messages: {session['messages_received']:,} | "
+                      f"Status: {session['status']}")
+
+        if not data_stats.empty:
+            print(f"\n Data Summary:")
+            print(f"{'Symbol':<20} {'Ticks':<10} {'First':<20} {'Last':<20}")
+            print("-" * 70)
+            for _, row in data_stats.head().iterrows():
+                print(f"{row['symbol']:<20} {row['tick_count']:,<10} "
+                      f"{row['first_tick'][:19]:<20} {row['last_tick'][:19]:<20}")
+        else:
+            print(" No market data found.")
+
+    except Exception as e:
+        print(f" Error reading stats: {e}")
+
+
+def update_pin():
+    """Update the trading PIN"""
+    print("\n" + "=" * 60)
+    print(" UPDATE TRADING PIN")
+    print("=" * 60)
+
+    auth_manager = FyersAuthManager()
+
+    # Clear existing PIN
+    auth_manager.pin = None
+    if 'FYERS_PIN' in os.environ:
+        del os.environ['FYERS_PIN']
+
+    try:
+        pin = auth_manager.get_or_request_pin()
+        if pin:
+            print(" PIN updated successfully!")
+        else:
+            print(" PIN update failed!")
+    except Exception as e:
+        print(f" Error updating PIN: {e}")
+
+
+def main():
+    """Main function with enhanced authentication and menu system"""
+
+    # Handle command line arguments
     if len(sys.argv) > 1:
         command = sys.argv[1].lower()
 
@@ -707,100 +932,101 @@ def main():
             setup_authentication()
             return
         elif command == "test-auth":
-            auth_manager = FyersAuthManager()
-            token = auth_manager.get_valid_access_token()
-            if token:
-                print("Authentication test successful!")
-            else:
-                print("Authentication test failed!")
+            test_authentication()
             return
+        elif command == "stream":
+            # Direct streaming mode
+            pass
+        else:
+            print("Available commands:")
+            print("  python main.py auth      - Setup authentication")
+            print("  python main.py test-auth - Test authentication")
+            print("  python main.py stream    - Start streaming directly")
+            print("  python main.py           - Interactive menu")
+            return
+
+    # Interactive mode or direct streaming
+    if len(sys.argv) == 1:
+        # Show menu
+        while True:
+            show_menu()
+            choice = input(" Select option (1-6): ").strip()
+
+            if choice == "1":
+                setup_authentication()
+            elif choice == "2":
+                test_authentication()
+            elif choice == "3":
+                break  # Continue to streaming
+            elif choice == "4":
+                show_streaming_stats()
+            elif choice == "5":
+                update_pin()
+            elif choice == "6":
+                print(" Goodbye!")
+                return
+            else:
+                print(" Invalid choice. Please select 1-6.")
 
     # Main streaming logic
     try:
+        print("\n" + "=" * 60)
+        print(" STARTING FYERS DATA STREAMING")
+        print("=" * 60)
+
         # Enhanced authentication
         auth_manager = FyersAuthManager()
         access_token = auth_manager.get_valid_access_token()
 
         if not access_token:
-            print("Authentication failed. Please run: python script.py auth")
+            print(" Authentication failed!")
+            print(" Please run authentication setup first.")
+            print(" Command: python main.py auth")
             return
 
         CLIENT_ID = os.environ.get('FYERS_CLIENT_ID')
 
-        # Symbols to stream
+        # Symbols to stream - you can customize this list
         SYMBOLS = [
-            "NSE:SBIN-EQ",
-            "NSE:RELIANCE-EQ",
-            "NSE:TCS-EQ",
-            "NSE:INFY-EQ",
-            "NSE:HDFCBANK-EQ"
+            "NSE:SBIN-EQ",  # State Bank of India
+            "NSE:RELIANCE-EQ",  # Reliance Industries
+            "NSE:TCS-EQ",  # Tata Consultancy Services
+            "NSE:INFY-EQ",  # Infosys
+            "NSE:HDFCBANK-EQ",  # HDFC Bank
+            "NSE:ICICIBANK-EQ",  # ICICI Bank
+            "NSE:LT-EQ",  # Larsen & Toubro
+            "NSE:WIPRO-EQ",  # Wipro
+            "NSE:MARUTI-EQ",  # Maruti Suzuki
+            "NSE:ITC-EQ"  # ITC
         ]
 
-        DB_PATH = "fyers_market_data_v3.db"
+        DB_PATH = "fyers_market_data.db"
+
+        print(f" Authentication successful!")
+        print(f" Client ID: {CLIENT_ID}")
+        print(f" Symbols to stream: {len(SYMBOLS)}")
+        print(f" Database: {DB_PATH}")
+        print(f" Data Type: SymbolUpdate (Real-time quotes)")
 
         # Initialize and run streamer
         streamer = FyersDataStreamerV3(CLIENT_ID, access_token, DB_PATH)
 
-        logging.info("Starting Fyers API v3 data streaming with enhanced authentication...")
-        logging.info(f"Symbols: {SYMBOLS}")
-        logging.info(f"Database: {DB_PATH}")
-
+        print(f"\nInitializing WebSocket connection...")
         streamer.start_streaming(SYMBOLS, data_type="SymbolUpdate")
 
     except KeyboardInterrupt:
-        logging.info("Received interrupt signal, stopping...")
+        print(f"\nReceived interrupt signal (Ctrl+C)")
+        print(f"Stopping streaming gracefully...")
         if 'streamer' in locals():
             streamer.stop_streaming()
+        print(f"Streaming stopped successfully!")
 
     except Exception as e:
-        logging.error(f"Application error: {e}")
+        print(f"\n Application error: {e}")
+        logging.error(f"Fatal application error: {e}", exc_info=True)
         if 'streamer' in locals():
             streamer.stop_streaming()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        print("Fyers Data Streaming with Enhanced Authentication")
-        print("=" * 50)
-        print("1. Setup Authentication")
-        print("2. Test Authentication")
-        print("3. Start Streaming")
-        print("4. Exit")
-
-        choice = input("\nSelect option (1-4): ").strip()
-
-        if choice == "1":
-            setup_authentication()
-        elif choice == "2":
-            auth_manager = FyersAuthManager()
-            token = auth_manager.get_valid_access_token()
-            if token:
-                print("✅ Authentication test successful!")
-
-                # Test API call
-                try:
-                    headers = {'Authorization': f"{os.environ.get('FYERS_CLIENT_ID')}:{token}"}
-                    response = requests.get('https://api-t1.fyers.in/api/v3/profile', headers=headers)
-
-                    if response.status_code == 200:
-                        result = response.json()
-                        if result.get('s') == 'ok':
-                            profile = result.get('data', {})
-                            print(f"Profile: {profile.get('name', 'Unknown')}")
-                            print(f"Email: {profile.get('email', 'Unknown')}")
-                        else:
-                            print(f"API Error: {result.get('message')}")
-                    else:
-                        print(f"HTTP Error: {response.status_code}")
-                except Exception as e:
-                    print(f"API test error: {e}")
-            else:
-                print("❌ Authentication test failed!")
-        elif choice == "3":
-            main()
-        elif choice == "4":
-            print("Goodbye!")
-        else:
-            print("Invalid choice")
-    else:
-        main()
+    main()
