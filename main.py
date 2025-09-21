@@ -32,6 +32,77 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class DatabaseManager:
+    """Manages daily database files and operations"""
+
+    def __init__(self, base_name: str = "fyers_market_data"):
+        self.base_name = base_name
+        self.db_directory = "data"  # Directory to store database files
+        self.ensure_directory_exists()
+
+    def ensure_directory_exists(self):
+        """Create data directory if it doesn't exist"""
+        if not os.path.exists(self.db_directory):
+            os.makedirs(self.db_directory)
+            logger.info(f"Created database directory: {self.db_directory}")
+
+    def get_daily_db_path(self, date: datetime = None) -> str:
+        """Generate database path for a specific date"""
+        if date is None:
+            date = datetime.now()
+
+        date_str = date.strftime("%Y%m%d")
+        db_filename = f"{self.base_name}_{date_str}.db"
+        return os.path.join(self.db_directory, db_filename)
+
+    def get_current_db_path(self) -> str:
+        """Get database path for current date"""
+        return self.get_daily_db_path()
+
+    def list_available_databases(self) -> List[Tuple[str, str]]:
+        """List all available database files with their dates"""
+        databases = []
+        if os.path.exists(self.db_directory):
+            for file in os.listdir(self.db_directory):
+                if file.startswith(self.base_name) and file.endswith('.db'):
+                    # Extract date from filename
+                    try:
+                        date_part = file.replace(self.base_name + '_', '').replace('.db', '')
+                        date_obj = datetime.strptime(date_part, '%Y%m%d')
+                        full_path = os.path.join(self.db_directory, file)
+                        databases.append((date_obj.strftime('%Y-%m-%d'), full_path))
+                    except ValueError:
+                        continue
+
+        return sorted(databases, key=lambda x: x[0], reverse=True)
+
+    def cleanup_old_databases(self, keep_days: int = 30):
+        """Remove database files older than specified days"""
+        cutoff_date = datetime.now() - timedelta(days=keep_days)
+        removed_count = 0
+
+        if os.path.exists(self.db_directory):
+            for file in os.listdir(self.db_directory):
+                if file.startswith(self.base_name) and file.endswith('.db'):
+                    try:
+                        date_part = file.replace(self.base_name + '_', '').replace('.db', '')
+                        file_date = datetime.strptime(date_part, '%Y%m%d')
+
+                        if file_date < cutoff_date:
+                            file_path = os.path.join(self.db_directory, file)
+                            os.remove(file_path)
+                            removed_count += 1
+                            logger.info(f"Removed old database: {file}")
+
+                    except (ValueError, OSError) as e:
+                        logger.error(f"Error processing file {file}: {e}")
+
+        if removed_count > 0:
+            logger.info(f"Cleanup completed: removed {removed_count} old database files")
+
+        return removed_count
+
+
 class FyersAuthManager:
     """Enhanced Fyers authentication manager with refresh token and PIN support"""
 
@@ -322,18 +393,18 @@ class FyersAuthManager:
 
 
 class FyersDataStreamerV3:
-    def __init__(self, client_id: str, access_token: str, db_path: str = "fyers_market_data.db"):
+    def __init__(self, client_id: str, access_token: str, db_manager: DatabaseManager = None):
         """
-        Initialize Fyers Data Streamer with API v3
+        Initialize Fyers Data Streamer with API v3 and daily database support
 
         Args:
             client_id: Your Fyers client ID
             access_token: Your Fyers access token
-            db_path: Path to SQLite database file
+            db_manager: DatabaseManager instance for handling daily databases
         """
         self.client_id = client_id
         self.access_token = access_token
-        self.db_path = db_path
+        self.db_manager = db_manager if db_manager else DatabaseManager()
 
         # Initialize Fyers API v3 model
         self.fyers = fyersModel.FyersModel(client_id=client_id, token=access_token)
@@ -349,7 +420,11 @@ class FyersDataStreamerV3:
         # WebSocket connection
         self.websocket = None
 
-        # Database connection
+        # Current database path (changes daily)
+        self.current_db_path = self.db_manager.get_current_db_path()
+        self.current_date = datetime.now().date()
+
+        # Setup database for current day
         self.setup_database()
 
         # Statistics tracking
@@ -358,16 +433,43 @@ class FyersDataStreamerV3:
             'messages_saved': 0,
             'errors': 0,
             'start_time': None,
-            'connection_status': 'disconnected'
+            'connection_status': 'disconnected',
+            'current_db': self.current_db_path
         }
 
         # Symbol mapping for easier access
         self.symbol_mapping = {}
 
+    def check_and_update_database(self):
+        """Check if date has changed and update database accordingly"""
+        current_date = datetime.now().date()
+
+        if current_date != self.current_date:
+            logger.info(f"Date changed from {self.current_date} to {current_date}")
+            logger.info(f"Switching from database: {self.current_db_path}")
+
+            # Update to new database
+            self.current_date = current_date
+            self.current_db_path = self.db_manager.get_current_db_path()
+            self.stats['current_db'] = self.current_db_path
+
+            # Setup new database
+            self.setup_database()
+
+            logger.info(f"Switched to new database: {self.current_db_path}")
+
+            # Optional: Cleanup old databases (keep last 30 days)
+            try:
+                self.db_manager.cleanup_old_databases(keep_days=30)
+            except Exception as e:
+                logger.error(f"Error during database cleanup: {e}")
+
     def setup_database(self):
-        """Create SQLite database and tables"""
+        """Create SQLite database and tables for current day"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            logger.info(f"Setting up database: {self.current_db_path}")
+
+            conn = sqlite3.connect(self.current_db_path)
             cursor = conn.cursor()
 
             # Create market data table with v3 API fields
@@ -445,21 +547,44 @@ class FyersDataStreamerV3:
                     messages_received INTEGER,
                     messages_saved INTEGER,
                     status TEXT,
-                    api_version TEXT
+                    api_version TEXT,
+                    trading_date TEXT
                 )
             ''')
 
+            # Add database metadata
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS database_info (
+                    created_date TEXT PRIMARY KEY,
+                    creation_timestamp TEXT,
+                    total_records INTEGER DEFAULT 0,
+                    last_updated TEXT
+                )
+            ''')
+
+            # Insert or update database info
+            today_str = self.current_date.strftime('%Y-%m-%d')
+            cursor.execute('''
+                INSERT OR REPLACE INTO database_info 
+                (created_date, creation_timestamp, last_updated)
+                VALUES (?, ?, ?)
+            ''', (today_str, datetime.now().isoformat(), datetime.now().isoformat()))
+
             conn.commit()
             conn.close()
-            logging.info(f"Database initialized: {self.db_path}")
+            logger.info(f"Database initialized: {self.current_db_path}")
 
         except Exception as e:
-            logging.error(f"Database setup error: {e}")
+            logger.error(f"Database setup error: {e}")
             raise
 
     def on_message(self, message):
         """Handle incoming WebSocket messages from Fyers API v3"""
         try:
+            # Check if date has changed (at start of each message processing)
+            if self.stats['messages_received'] % 1000 == 0:  # Check every 1000 messages
+                self.check_and_update_database()
+
             self.stats['messages_received'] += 1
 
             # Fyers API v3 message format
@@ -471,7 +596,7 @@ class FyersDataStreamerV3:
                 self.data_queue.put(message)
 
                 if self.stats['messages_received'] % 100 == 0:
-                    logging.info(f"Received {self.stats['messages_received']} messages")
+                    logging.info(f"Received {self.stats['messages_received']} messages - DB: {os.path.basename(self.current_db_path)}")
 
         except Exception as e:
             logging.error(f"Error processing message: {e}")
@@ -523,9 +648,10 @@ class FyersDataStreamerV3:
             self.save_batch_to_db(batch_data)
 
     def save_batch_to_db(self, batch_data: List[Dict]):
-        """Save batch of data to database"""
+        """Save batch of data to current database"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            # Use current database path
+            conn = sqlite3.connect(self.current_db_path)
             cursor = conn.cursor()
 
             for data in batch_data:
@@ -688,20 +814,20 @@ class FyersDataStreamerV3:
         connection_thread.start()
 
     def create_session_record(self, session_id: str, symbols: List[str]):
-        """Create a session record in database"""
+        """Create a session record in current database"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.current_db_path)
             cursor = conn.cursor()
 
             cursor.execute('''
                 INSERT INTO streaming_sessions 
-                (session_id, start_time, symbols_count, messages_received, messages_saved, status, api_version)
-                VALUES (?, ?, ?, 0, 0, 'RUNNING', 'v3')
-            ''', (session_id, datetime.now().isoformat(), len(symbols)))
+                (session_id, start_time, symbols_count, messages_received, messages_saved, status, api_version, trading_date)
+                VALUES (?, ?, ?, 0, 0, 'RUNNING', 'v3', ?)
+            ''', (session_id, datetime.now().isoformat(), len(symbols), self.current_date.strftime('%Y-%m-%d')))
 
             conn.commit()
             conn.close()
-            logging.info(f"Session record created: {session_id}")
+            logging.info(f"Session record created: {session_id} in database: {os.path.basename(self.current_db_path)}")
 
         except Exception as e:
             logging.error(f"Error creating session record: {e}")
@@ -718,11 +844,21 @@ class FyersDataStreamerV3:
         logging.info(f"  Messages received: {self.stats['messages_received']}")
         logging.info(f"  Messages saved: {self.stats['messages_saved']}")
         logging.info(f"  Errors: {self.stats['errors']}")
+        logging.info(f"  Current database: {self.current_db_path}")
 
-    def get_historical_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Retrieve historical data from database"""
+    def get_historical_data(self, symbol: str, start_date: str, end_date: str, db_date: str = None) -> pd.DataFrame:
+        """Retrieve historical data from database for specific date"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            # Use specific database or current one
+            if db_date:
+                db_path = self.db_manager.get_daily_db_path(datetime.strptime(db_date, '%Y-%m-%d'))
+                if not os.path.exists(db_path):
+                    logging.warning(f"Database for date {db_date} not found: {db_path}")
+                    return pd.DataFrame()
+            else:
+                db_path = self.current_db_path
+
+            conn = sqlite3.connect(db_path)
 
             df = pd.read_sql_query('''
                 SELECT timestamp, symbol, ltp, open_price, high_price, low_price, close_price,
@@ -743,6 +879,57 @@ class FyersDataStreamerV3:
         except Exception as e:
             logging.error(f"Error retrieving historical data: {e}")
             return pd.DataFrame()
+
+    def get_all_databases_summary(self) -> pd.DataFrame:
+        """Get summary of all available databases"""
+        databases = self.db_manager.list_available_databases()
+        summary_data = []
+
+        for date_str, db_path in databases:
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+
+                # Get record count
+                cursor.execute("SELECT COUNT(*) FROM market_data")
+                record_count = cursor.fetchone()[0]
+
+                # Get unique symbols
+                cursor.execute("SELECT COUNT(DISTINCT symbol) FROM market_data")
+                symbol_count = cursor.fetchone()[0]
+
+                # Get time range
+                cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM market_data")
+                time_range = cursor.fetchone()
+
+                # Get file size
+                file_size = os.path.getsize(db_path) / (1024 * 1024)  # MB
+
+                summary_data.append({
+                    'date': date_str,
+                    'database_file': os.path.basename(db_path),
+                    'records': record_count,
+                    'symbols': symbol_count,
+                    'first_record': time_range[0] if time_range[0] else 'N/A',
+                    'last_record': time_range[1] if time_range[1] else 'N/A',
+                    'size_mb': round(file_size, 2)
+                })
+
+                conn.close()
+
+            except Exception as e:
+                logging.error(f"Error reading database {db_path}: {e}")
+                summary_data.append({
+                    'date': date_str,
+                    'database_file': os.path.basename(db_path),
+                    'records': 'Error',
+                    'symbols': 'Error',
+                    'first_record': 'Error',
+                    'last_record': 'Error',
+                    'size_mb': 'Error'
+                })
+
+        return pd.DataFrame(summary_data)
 
 
 def setup_authentication():
@@ -827,31 +1014,34 @@ def test_authentication():
 def show_menu():
     """Display the main menu"""
     print("\n" + "=" * 60)
-    print(" FYERS DATA STREAMING - ENHANCED VERSION")
+    print(" FYERS DATA STREAMING - DAILY DATABASE VERSION")
     print("=" * 60)
     print("1. Setup Authentication")
     print("2. Test Authentication")
     print("3. Start Data Streaming")
     print("4. View Streaming Stats")
-    print("5. Update PIN")
-    print("6. Exit")
+    print("5. View Database Summary")
+    print("6. Cleanup Old Databases")
+    print("7. Update PIN")
+    print("8. Exit")
     print("=" * 60)
 
 
 def show_streaming_stats():
     """Show current streaming statistics"""
-    db_path = "fyers_market_data.db"
+    db_manager = DatabaseManager()
+    current_db_path = db_manager.get_current_db_path()
 
-    if not os.path.exists(db_path):
-        print(" No database found. Start streaming first.")
+    if not os.path.exists(current_db_path):
+        print(" No database found for today. Start streaming first.")
         return
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(current_db_path)
 
         # Get session stats
         sessions_df = pd.read_sql_query('''
-            SELECT session_id, start_time, symbols_count, messages_received, messages_saved, status
+            SELECT session_id, start_time, symbols_count, messages_received, messages_saved, status, trading_date
             FROM streaming_sessions 
             ORDER BY start_time DESC 
             LIMIT 5
@@ -873,13 +1063,15 @@ def show_streaming_stats():
         conn.close()
 
         print("\n" + "=" * 60)
-        print(" STREAMING STATISTICS")
+        print(f" STREAMING STATISTICS - {datetime.now().strftime('%Y-%m-%d')}")
         print("=" * 60)
+        print(f" Current Database: {os.path.basename(current_db_path)}")
 
         if not sessions_df.empty:
             print("\n Recent Sessions:")
             for _, session in sessions_df.iterrows():
                 print(f"   {session['start_time'][:19]} | "
+                      f"Date: {session['trading_date']} | "
                       f"Symbols: {session['symbols_count']} | "
                       f"Messages: {session['messages_received']:,} | "
                       f"Status: {session['status']}")
@@ -892,10 +1084,136 @@ def show_streaming_stats():
                 print(f"{row['symbol']:<20} {row['tick_count']:,<10} "
                       f"{row['first_tick'][:19]:<20} {row['last_tick'][:19]:<20}")
         else:
-            print(" No market data found.")
+            print(" No market data found for today.")
 
     except Exception as e:
         print(f" Error reading stats: {e}")
+
+
+def show_database_summary():
+    """Show summary of all databases"""
+    print("\n" + "=" * 60)
+    print(" DATABASE SUMMARY")
+    print("=" * 60)
+
+    db_manager = DatabaseManager()
+
+    try:
+        # Initialize a temporary streamer to get database summary
+        streamer = FyersDataStreamerV3("dummy", "dummy", db_manager)
+        summary_df = streamer.get_all_databases_summary()
+
+        if not summary_df.empty:
+            print(f"\n Found {len(summary_df)} database files:")
+            print(f"{'Date':<12} {'File':<30} {'Records':<10} {'Symbols':<8} {'Size(MB)':<10}")
+            print("-" * 80)
+
+            total_records = 0
+            total_size = 0
+
+            for _, row in summary_df.iterrows():
+                print(f"{row['date']:<12} {row['database_file']:<30} "
+                      f"{row['records']:<10} {row['symbols']:<8} {row['size_mb']:<10}")
+
+                if isinstance(row['records'], int):
+                    total_records += row['records']
+                if isinstance(row['size_mb'], (int, float)):
+                    total_size += row['size_mb']
+
+            print("-" * 80)
+            print(f"{'TOTAL':<42} {total_records:,<10} {'':<8} {total_size:.2f}")
+
+        else:
+            print(" No database files found.")
+
+    except Exception as e:
+        print(f" Error generating database summary: {e}")
+
+
+def cleanup_old_databases():
+    """Cleanup old databases interactively"""
+    print("\n" + "=" * 60)
+    print(" DATABASE CLEANUP")
+    print("=" * 60)
+
+    db_manager = DatabaseManager()
+
+    try:
+        # Show current databases
+        databases = db_manager.list_available_databases()
+
+        if not databases:
+            print(" No database files found.")
+            return
+
+        print(f" Found {len(databases)} database files:")
+        for i, (date_str, db_path) in enumerate(databases[:10], 1):  # Show first 10
+            file_size = os.path.getsize(db_path) / (1024 * 1024)  # MB
+            print(f"   {i:2d}. {date_str} - {os.path.basename(db_path)} ({file_size:.1f} MB)")
+
+        if len(databases) > 10:
+            print(f"   ... and {len(databases) - 10} more files")
+
+        print(f"\n Options:")
+        print(f"   1. Keep last 7 days")
+        print(f"   2. Keep last 30 days")
+        print(f"   3. Keep last 90 days")
+        print(f"   4. Custom number of days")
+        print(f"   5. Cancel")
+
+        choice = input("\n Select option (1-5): ").strip()
+
+        if choice == "1":
+            keep_days = 7
+        elif choice == "2":
+            keep_days = 30
+        elif choice == "3":
+            keep_days = 90
+        elif choice == "4":
+            try:
+                keep_days = int(input(" Enter number of days to keep: "))
+                if keep_days < 1:
+                    print(" Invalid number of days.")
+                    return
+            except ValueError:
+                print(" Invalid input.")
+                return
+        elif choice == "5":
+            print(" Cleanup cancelled.")
+            return
+        else:
+            print(" Invalid choice.")
+            return
+
+        # Confirm cleanup
+        cutoff_date = datetime.now() - timedelta(days=keep_days)
+        files_to_remove = [
+            (date_str, db_path) for date_str, db_path in databases
+            if datetime.strptime(date_str, '%Y-%m-%d') < cutoff_date
+        ]
+
+        if not files_to_remove:
+            print(f" No files older than {keep_days} days found.")
+            return
+
+        print(f"\n Files to be removed ({len(files_to_remove)} files):")
+        total_size = 0
+        for date_str, db_path in files_to_remove:
+            file_size = os.path.getsize(db_path) / (1024 * 1024)  # MB
+            total_size += file_size
+            print(f"   {date_str} - {os.path.basename(db_path)} ({file_size:.1f} MB)")
+
+        print(f"\n Total space to be freed: {total_size:.1f} MB")
+
+        confirm = input(f"\n Proceed with cleanup? (y/N): ").strip().lower()
+        if confirm == 'y':
+            removed_count = db_manager.cleanup_old_databases(keep_days)
+            print(f"\n Cleanup completed: removed {removed_count} files")
+        else:
+            print(" Cleanup cancelled.")
+
+    except Exception as e:
+        print(f" Error during cleanup: {e}")
 
 
 def update_pin():
@@ -922,7 +1240,7 @@ def update_pin():
 
 
 def main():
-    """Main function with enhanced authentication and menu system"""
+    """Main function with enhanced authentication and daily database support"""
 
     # Handle command line arguments
     if len(sys.argv) > 1:
@@ -937,11 +1255,15 @@ def main():
         elif command == "stream":
             # Direct streaming mode
             pass
+        elif command == "cleanup":
+            cleanup_old_databases()
+            return
         else:
             print("Available commands:")
             print("  python main.py auth      - Setup authentication")
             print("  python main.py test-auth - Test authentication")
             print("  python main.py stream    - Start streaming directly")
+            print("  python main.py cleanup   - Cleanup old databases")
             print("  python main.py           - Interactive menu")
             return
 
@@ -950,7 +1272,7 @@ def main():
         # Show menu
         while True:
             show_menu()
-            choice = input(" Select option (1-6): ").strip()
+            choice = input(" Select option (1-8): ").strip()
 
             if choice == "1":
                 setup_authentication()
@@ -961,17 +1283,21 @@ def main():
             elif choice == "4":
                 show_streaming_stats()
             elif choice == "5":
-                update_pin()
+                show_database_summary()
             elif choice == "6":
+                cleanup_old_databases()
+            elif choice == "7":
+                update_pin()
+            elif choice == "8":
                 print(" Goodbye!")
                 return
             else:
-                print(" Invalid choice. Please select 1-6.")
+                print(" Invalid choice. Please select 1-8.")
 
     # Main streaming logic
     try:
         print("\n" + "=" * 60)
-        print(" STARTING FYERS DATA STREAMING")
+        print(" STARTING FYERS DATA STREAMING - DAILY DATABASE MODE")
         print("=" * 60)
 
         # Enhanced authentication
@@ -986,6 +1312,10 @@ def main():
 
         CLIENT_ID = os.environ.get('FYERS_CLIENT_ID')
 
+        # Initialize database manager
+        db_manager = DatabaseManager()
+        current_db_path = db_manager.get_current_db_path()
+
         # Symbols to stream - you can customize this list
         SYMBOLS = [
             "NSE:SBIN-EQ",  # State Bank of India
@@ -997,22 +1327,31 @@ def main():
             "NSE:LT-EQ",  # Larsen & Toubro
             "NSE:WIPRO-EQ",  # Wipro
             "NSE:MARUTI-EQ",  # Maruti Suzuki
-            "NSE:ITC-EQ"  # ITC
+            "NSE:ITC-EQ",  # ITC
+            "NSE:NIFTY2592325300CE",  # NIFTY CALL
+            "NSE:NIFTY2592325300PE"  # NIFTY PUT
         ]
-
-        DB_PATH = "fyers_market_data.db"
 
         print(f" Authentication successful!")
         print(f" Client ID: {CLIENT_ID}")
         print(f" Symbols to stream: {len(SYMBOLS)}")
-        print(f" Database: {DB_PATH}")
-        print(f" Data Type: SymbolUpdate (Real-time quotes)")
+        print(f" Current Database: {current_db_path}")
+        print(f" Trading Date: {datetime.now().strftime('%Y-%m-%d')}")
+        print(f" Data Type: DepthUpdate (Real-time quotes)")
+        print(f" Database Directory: {db_manager.db_directory}")
+
+        # Show existing databases
+        existing_dbs = db_manager.list_available_databases()
+        if existing_dbs:
+            print(f" Found {len(existing_dbs)} existing database files")
+            print(f" Latest: {existing_dbs[0][0]} - {os.path.basename(existing_dbs[0][1])}")
 
         # Initialize and run streamer
-        streamer = FyersDataStreamerV3(CLIENT_ID, access_token, DB_PATH)
+        streamer = FyersDataStreamerV3(CLIENT_ID, access_token, db_manager)
 
         print(f"\nInitializing WebSocket connection...")
-        streamer.start_streaming(SYMBOLS, data_type="SymbolUpdate")
+        print(f"Note: Database will automatically switch to new file at midnight")
+        streamer.start_streaming(SYMBOLS, data_type="DepthUpdate") #SymbolUpdate,DepthUpdate
 
     except KeyboardInterrupt:
         print(f"\nReceived interrupt signal (Ctrl+C)")
@@ -1020,6 +1359,7 @@ def main():
         if 'streamer' in locals():
             streamer.stop_streaming()
         print(f"Streaming stopped successfully!")
+        print(f"Data saved to: {streamer.current_db_path}")
 
     except Exception as e:
         print(f"\n Application error: {e}")
