@@ -392,15 +392,114 @@ class FyersAuthManager:
             return None
 
 
+import sqlite3
+import json
+import logging
+import threading
+import time
+import os
+import hashlib
+import requests
+import getpass
+import sys
+from datetime import datetime, timedelta
+import queue
+from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket import data_ws
+import pandas as pd
+from typing import Dict, List, Optional, Tuple
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('fyers_streaming.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseManager:
+    """Manages daily database files and operations"""
+
+    def __init__(self, base_name: str = "fyers_market_data"):
+        self.base_name = base_name
+        self.db_directory = "data"  # Directory to store database files
+        self.ensure_directory_exists()
+
+    def ensure_directory_exists(self):
+        """Create data directory if it doesn't exist"""
+        if not os.path.exists(self.db_directory):
+            os.makedirs(self.db_directory)
+            logger.info(f"Created database directory: {self.db_directory}")
+
+    def get_daily_db_path(self, date: datetime = None) -> str:
+        """Generate database path for a specific date"""
+        if date is None:
+            date = datetime.now()
+
+        date_str = date.strftime("%Y%m%d")
+        db_filename = f"{self.base_name}_{date_str}.db"
+        return os.path.join(self.db_directory, db_filename)
+
+    def get_current_db_path(self) -> str:
+        """Get database path for current date"""
+        return self.get_daily_db_path()
+
+    def list_available_databases(self) -> List[Tuple[str, str]]:
+        """List all available database files with their dates"""
+        databases = []
+        if os.path.exists(self.db_directory):
+            for file in os.listdir(self.db_directory):
+                if file.startswith(self.base_name) and file.endswith('.db'):
+                    try:
+                        date_part = file.replace(self.base_name + '_', '').replace('.db', '')
+                        date_obj = datetime.strptime(date_part, '%Y%m%d')
+                        full_path = os.path.join(self.db_directory, file)
+                        databases.append((date_obj.strftime('%Y-%m-%d'), full_path))
+                    except ValueError:
+                        continue
+
+        return sorted(databases, key=lambda x: x[0], reverse=True)
+
+    def cleanup_old_databases(self, keep_days: int = 30):
+        """Remove database files older than specified days"""
+        cutoff_date = datetime.now() - timedelta(days=keep_days)
+        removed_count = 0
+
+        if os.path.exists(self.db_directory):
+            for file in os.listdir(self.db_directory):
+                if file.startswith(self.base_name) and file.endswith('.db'):
+                    try:
+                        date_part = file.replace(self.base_name + '_', '').replace('.db', '')
+                        file_date = datetime.strptime(date_part, '%Y%m%d')
+
+                        if file_date < cutoff_date:
+                            file_path = os.path.join(self.db_directory, file)
+                            os.remove(file_path)
+                            removed_count += 1
+                            logger.info(f"Removed old database: {file}")
+
+                    except (ValueError, OSError) as e:
+                        logger.error(f"Error processing file {file}: {e}")
+
+        if removed_count > 0:
+            logger.info(f"Cleanup completed: removed {removed_count} old database files")
+
+        return removed_count
+
+
 class FyersDataStreamerV3:
     def __init__(self, client_id: str, access_token: str, db_manager: DatabaseManager = None):
         """
         Initialize Fyers Data Streamer with API v3 and daily database support
-
-        Args:
-            client_id: Your Fyers client ID
-            access_token: Your Fyers access token
-            db_manager: DatabaseManager instance for handling daily databases
         """
         self.client_id = client_id
         self.access_token = access_token
@@ -412,6 +511,8 @@ class FyersDataStreamerV3:
         # Connection state
         self.is_connected = False
         self.reconnect_count = 0
+        self.connection_lost_time = None
+        self.last_message_time = None
 
         # Data queue for thread-safe operations
         self.data_queue = queue.Queue(maxsize=10000)
@@ -419,6 +520,8 @@ class FyersDataStreamerV3:
 
         # WebSocket connection
         self.websocket = None
+        self.subscribed_symbols = []  # Track subscribed symbols
+        self.data_type = "SymbolUpdate"  # Track data type
 
         # Current database path (changes daily)
         self.current_db_path = self.db_manager.get_current_db_path()
@@ -434,11 +537,16 @@ class FyersDataStreamerV3:
             'errors': 0,
             'start_time': None,
             'connection_status': 'disconnected',
-            'current_db': self.current_db_path
+            'current_db': self.current_db_path,
+            'reconnections': 0,
+            'last_reconnection': None
         }
 
         # Symbol mapping for easier access
         self.symbol_mapping = {}
+
+        # Thread locks
+        self.connection_lock = threading.Lock()
 
     def check_and_update_database(self):
         """Check if date has changed and update database accordingly"""
@@ -581,6 +689,9 @@ class FyersDataStreamerV3:
     def on_message(self, message):
         """Handle incoming WebSocket messages from Fyers API v3"""
         try:
+            # Update last message time
+            self.last_message_time = datetime.now()
+
             # Check if date has changed (at start of each message processing)
             if self.stats['messages_received'] % 1000 == 0:  # Check every 1000 messages
                 self.check_and_update_database()
@@ -593,7 +704,11 @@ class FyersDataStreamerV3:
                 message['processing_timestamp'] = datetime.now().isoformat()
 
                 # Add to queue for processing
-                self.data_queue.put(message)
+                try:
+                    self.data_queue.put(message, timeout=1.0)  # Add timeout to prevent blocking
+                except queue.Full:
+                    logger.warning("Data queue is full, dropping message")
+                    self.stats['errors'] += 1
 
                 if self.stats['messages_received'] % 100 == 0:
                     logging.info(f"Received {self.stats['messages_received']} messages - DB: {os.path.basename(self.current_db_path)}")
@@ -608,50 +723,150 @@ class FyersDataStreamerV3:
         self.stats['errors'] += 1
         self.stats['connection_status'] = 'error'
 
+        with self.connection_lock:
+            if self.is_connected:
+                self.connection_lost_time = datetime.now()
+                self.is_connected = False
+
     def on_close(self):
         """Handle WebSocket close"""
         logging.info("WebSocket connection closed")
         self.stats['connection_status'] = 'disconnected'
 
+        with self.connection_lock:
+            if self.is_connected:
+                self.connection_lost_time = datetime.now()
+                self.is_connected = False
+
     def on_open(self):
-        """Handle WebSocket open"""
-        self.is_connected = True
-        self.reconnect_count = 0
-        logging.info("WebSocket connection opened")
-        self.stats['connection_status'] = 'connected'
+        """Handle WebSocket open - FIXED RESUBSCRIPTION"""
+        with self.connection_lock:
+            was_reconnection = not self.is_connected and self.connection_lost_time is not None
+
+            self.is_connected = True
+            self.stats['connection_status'] = 'connected'
+
+            if was_reconnection:
+                self.stats['reconnections'] += 1
+                self.stats['last_reconnection'] = datetime.now().isoformat()
+                reconnect_duration = datetime.now() - self.connection_lost_time
+                logging.info(f"WebSocket reconnected after {reconnect_duration.total_seconds():.1f} seconds")
+
+                # CRITICAL FIX: Re-subscribe to symbols after reconnection
+                if self.subscribed_symbols:
+                    logging.info(f"Re-subscribing to {len(self.subscribed_symbols)} symbols: {self.subscribed_symbols}")
+                    try:
+                        # Add a small delay to ensure connection is fully established
+                        time.sleep(0.5)
+                        self.websocket.subscribe(symbols=self.subscribed_symbols, data_type=self.data_type)
+                        logging.info("Successfully re-subscribed to symbols after reconnection")
+                    except Exception as e:
+                        logging.error(f"Failed to re-subscribe after reconnection: {e}")
+                        # Try again after a longer delay
+                        threading.Timer(2.0, self._retry_subscription).start()
+            else:
+                logging.info("Initial WebSocket connection opened")
+
+            self.connection_lost_time = None
+
+    def _retry_subscription(self):
+        """Retry subscription with exponential backoff"""
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries and self.running:
+            try:
+                if self.is_connected and self.websocket:
+                    logging.info(f"Retry {retry_count + 1}: Re-subscribing to symbols")
+                    self.websocket.subscribe(symbols=self.subscribed_symbols, data_type=self.data_type)
+                    logging.info("Successfully re-subscribed on retry")
+                    return
+            except Exception as e:
+                logging.error(f"Retry {retry_count + 1} failed: {e}")
+
+            retry_count += 1
+            if retry_count < max_retries:
+                delay = 2 ** retry_count  # Exponential backoff: 2, 4, 8 seconds
+                time.sleep(delay)
+
+        logging.error("Failed to re-subscribe after all retries")
 
     def process_data_queue(self):
         """Process data from queue and save to database"""
         batch_size = 100
         batch_data = []
+        last_batch_time = time.time()
+        batch_timeout = 5.0  # Process batch after 5 seconds even if not full
 
         while self.running:
             try:
                 try:
                     data = self.data_queue.get(timeout=1)
                     batch_data.append(data)
+                    self.data_queue.task_done()  # Mark task as done
                 except queue.Empty:
-                    if batch_data:
+                    current_time = time.time()
+                    # Process batch if timeout exceeded or if we have data
+                    if batch_data and (current_time - last_batch_time) > batch_timeout:
                         self.save_batch_to_db(batch_data)
                         batch_data = []
+                        last_batch_time = current_time
                     continue
 
+                # Process batch when it reaches the desired size
                 if len(batch_data) >= batch_size:
                     self.save_batch_to_db(batch_data)
                     batch_data = []
+                    last_batch_time = time.time()
 
             except Exception as e:
                 logging.error(f"Error in data processing thread: {e}")
                 self.stats['errors'] += 1
 
+        # Process remaining data when shutting down
         if batch_data:
             self.save_batch_to_db(batch_data)
+
+    def monitor_connection(self):
+        """Monitor connection health and detect issues"""
+        check_interval = 30  # Check every 30 seconds
+        message_timeout = 60  # Expect at least one message per minute
+
+        while self.running:
+            try:
+                time.sleep(check_interval)
+
+                if not self.running:
+                    break
+
+                current_time = datetime.now()
+
+                # Check if we haven't received messages for too long
+                if (self.last_message_time and
+                        (current_time - self.last_message_time).total_seconds() > message_timeout and
+                        self.is_connected):
+                    logging.warning(f"No messages received for {message_timeout} seconds - connection might be stale")
+
+                    # Log current statistics
+                    logging.info(f"Current stats - Connected: {self.is_connected}, "
+                                 f"Messages: {self.stats['messages_received']}, "
+                                 f"Queue size: {self.data_queue.qsize()}")
+
+                # Log periodic status
+                if self.stats['messages_received'] > 0:
+                    messages_per_second = self.stats['messages_received'] / max(1, (current_time - self.stats['start_time']).total_seconds())
+                    logging.info(f"Connection health - Messages/sec: {messages_per_second:.2f}, "
+                                 f"Queue: {self.data_queue.qsize()}, "
+                                 f"Reconnections: {self.stats['reconnections']}")
+
+            except Exception as e:
+                logging.error(f"Error in connection monitor: {e}")
 
     def save_batch_to_db(self, batch_data: List[Dict]):
         """Save batch of data to current database"""
         try:
             # Use current database path
-            conn = sqlite3.connect(self.current_db_path)
+            conn = sqlite3.connect(self.current_db_path, timeout=10.0)  # Add timeout
             cursor = conn.cursor()
 
             for data in batch_data:
@@ -762,21 +977,30 @@ class FyersDataStreamerV3:
         try:
             self.running = True
             self.stats['start_time'] = datetime.now()
+            self.subscribed_symbols = symbols.copy()  # Store symbols for reconnection
+            self.data_type = data_type  # Store data type for reconnection
 
             session_id = f"session_v3_{int(time.time())}"
             self.create_session_record(session_id, symbols)
 
+            # Start data processing thread
             processing_thread = threading.Thread(target=self.process_data_queue, daemon=True)
             processing_thread.start()
             logging.info("Data processing thread started")
 
+            # Start connection monitoring thread
+            monitor_thread = threading.Thread(target=self.monitor_connection, daemon=True)
+            monitor_thread.start()
+            logging.info("Connection monitoring thread started")
+
+            # Initialize WebSocket with better reconnection settings
             self.websocket = data_ws.FyersDataSocket(
                 access_token=self.access_token,
                 log_path="",
                 litemode=False,
                 write_to_file=False,
-                reconnect=True,
-                reconnect_retry=10,
+                reconnect=True,  # Enable auto-reconnect
+                reconnect_retry=5,  # Number of retry attempts (reduced for faster retries)
                 on_connect=self.on_open,
                 on_close=self.on_close,
                 on_error=self.on_error,
@@ -785,12 +1009,21 @@ class FyersDataStreamerV3:
 
             self._start_connection_thread()
 
-            while not self.is_connected:
+            # Wait for initial connection with timeout
+            connection_timeout = 30
+            start_time = time.time()
+            while not self.is_connected and (time.time() - start_time) < connection_timeout:
                 time.sleep(0.1)
 
-            self.websocket.subscribe(symbols=symbols, data_type=data_type)
-            logging.info(f"Subscribed to {len(symbols)} symbols: {symbols}")
+            if not self.is_connected:
+                raise Exception("Failed to establish WebSocket connection within timeout")
 
+            # Subscribe to symbols
+            logging.info(f"Subscribing to {len(symbols)} symbols: {symbols}")
+            self.websocket.subscribe(symbols=symbols, data_type=data_type)
+            logging.info("Successfully subscribed to symbols")
+
+            # Keep the WebSocket running
             self.websocket.keep_running()
 
             return self.is_connected
@@ -805,12 +1038,13 @@ class FyersDataStreamerV3:
 
         def run_connection():
             try:
+                logging.info("Starting WebSocket connection...")
                 self.websocket.connect()
             except Exception as e:
                 logging.error(f"Connection thread error: {e}")
+                self.stats['connection_status'] = 'error'
 
-        connection_thread = threading.Thread(target=run_connection)
-        connection_thread.daemon = True
+        connection_thread = threading.Thread(target=run_connection, daemon=True)
         connection_thread.start()
 
     def create_session_record(self, session_id: str, symbols: List[str]):
@@ -834,16 +1068,29 @@ class FyersDataStreamerV3:
 
     def stop_streaming(self):
         """Stop the streaming process"""
+        logging.info("Stopping streaming process...")
         self.running = False
+
         if self.websocket:
-            self.websocket.close_connection()
+            try:
+                self.websocket.close_connection()
+            except Exception as e:
+                logging.error(f"Error closing WebSocket: {e}")
+
+        # Wait for data queue to be processed
+        logging.info("Waiting for data queue to be processed...")
+        try:
+            self.data_queue.join()  # Wait for all queued items to be processed
+        except Exception as e:
+            logging.error(f"Error waiting for queue: {e}")
 
         duration = datetime.now() - self.stats['start_time'] if self.stats['start_time'] else timedelta(0)
-        logging.info(f"Streaming stopped. Statistics:")
+        logging.info(f"Streaming stopped. Final Statistics:")
         logging.info(f"  Duration: {duration}")
-        logging.info(f"  Messages received: {self.stats['messages_received']}")
-        logging.info(f"  Messages saved: {self.stats['messages_saved']}")
-        logging.info(f"  Errors: {self.stats['errors']}")
+        logging.info(f"  Messages received: {self.stats['messages_received']:,}")
+        logging.info(f"  Messages saved: {self.stats['messages_saved']:,}")
+        logging.info(f"  Errors: {self.stats['errors']:,}")
+        logging.info(f"  Reconnections: {self.stats['reconnections']:,}")
         logging.info(f"  Current database: {self.current_db_path}")
 
     def get_historical_data(self, symbol: str, start_date: str, end_date: str, db_date: str = None) -> pd.DataFrame:
@@ -1328,8 +1575,8 @@ def main():
             "NSE:WIPRO-EQ",  # Wipro
             "NSE:MARUTI-EQ",  # Maruti Suzuki
             "NSE:ITC-EQ",  # ITC
-            "NSE:NIFTY2592325300CE",  # NIFTY CALL
-            "NSE:NIFTY2592325300PE"  # NIFTY PUT
+            "NSE:NIFTY25SEP25100CE",  # NIFTY CALL
+            "NSE:NIFTY25SEP25100PE"  # NIFTY PUT
         ]
 
         print(f" Authentication successful!")

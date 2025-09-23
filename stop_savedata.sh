@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Log the stop attempt
-echo "$(date): Attempting to stop scalping process..." >> /var/log/savedata.log
+echo "$(date): Attempting to stop save data process..." >> /var/log/savedata.log
 
 # Method 1: Find and kill by script name
 pkill -f "main.py stream"
