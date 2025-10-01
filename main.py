@@ -1565,18 +1565,12 @@ def main():
 
         # Symbols to stream - you can customize this list
         SYMBOLS = [
-            "NSE:SBIN-EQ",  # State Bank of India
-            "NSE:RELIANCE-EQ",  # Reliance Industries
             "NSE:TCS-EQ",  # Tata Consultancy Services
             "NSE:INFY-EQ",  # Infosys
-            "NSE:HDFCBANK-EQ",  # HDFC Bank
-            "NSE:ICICIBANK-EQ",  # ICICI Bank
             "NSE:LT-EQ",  # Larsen & Toubro
             "NSE:WIPRO-EQ",  # Wipro
-            "NSE:MARUTI-EQ",  # Maruti Suzuki
-            "NSE:ITC-EQ",  # ITC
-            "NSE:NIFTY25SEP25100CE",  # NIFTY CALL
-            "NSE:NIFTY25SEP25100PE"  # NIFTY PUT
+            "NSE:NIFTY25O0724700CE",  # NIFTY CALL
+            "NSE:NIFTY25O0724700PE"  # NIFTY PUT
         ]
 
         print(f" Authentication successful!")
@@ -1598,7 +1592,7 @@ def main():
 
         print(f"\nInitializing WebSocket connection...")
         print(f"Note: Database will automatically switch to new file at midnight")
-        streamer.start_streaming(SYMBOLS, data_type="DepthUpdate") #SymbolUpdate,DepthUpdate
+        streamer.start_streaming(SYMBOLS, data_type="SymbolUpdate") #SymbolUpdate,DepthUpdate
 
     except KeyboardInterrupt:
         print(f"\nReceived interrupt signal (Ctrl+C)")
