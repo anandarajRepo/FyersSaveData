@@ -1565,12 +1565,13 @@ def main():
 
         # Symbols to stream - you can customize this list
         SYMBOLS = [
-            "NSE:TCS-EQ",  # Tata Consultancy Services
-            "NSE:INFY-EQ",  # Infosys
-            "NSE:LT-EQ",  # Larsen & Toubro
-            "NSE:WIPRO-EQ",  # Wipro
-            "NSE:NIFTY25O0724700CE",  # NIFTY CALL
-            "NSE:NIFTY25O0724700PE"  # NIFTY PUT
+            "NSE:STLNETWORK-EQ",
+            "NSE:STLTECH-EQ",
+            "NSE:SKYGOLD-EQ",
+            "NSE:AXISCADES-EQ",
+            "NSE:SATTRIX-MT",
+            "NSE:NIFTY25O1425100CE",  # NIFTY CALL
+            "NSE:NIFTY25O1425100PE"  # NIFTY PUT
         ]
 
         print(f" Authentication successful!")
