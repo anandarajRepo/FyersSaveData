@@ -31,7 +31,7 @@ class ATMSymbolGenerator:
             'option_prefix': 'NIFTY',
             'strike_interval': 50,
             'lot_size': 50,
-            'expiry_day': 3,  # Thursday (0=Monday, 6=Sunday)
+            'expiry_day': 1,  # Thursday (0=Monday, 6=Sunday)
             'expiry_type': 'weekly'  # weekly or monthly
         },
         'BANKNIFTY': {
@@ -39,8 +39,8 @@ class ATMSymbolGenerator:
             'option_prefix': 'BANKNIFTY',
             'strike_interval': 100,
             'lot_size': 30,
-            'expiry_day': 2,  # Wednesday
-            'expiry_type': 'weekly'
+            'expiry_day': 1,  # Tuesday
+            'expiry_type': 'monthly'
         },
         'FINNIFTY': {
             'spot_symbol': 'NSE:FINNIFTY-INDEX',
@@ -48,15 +48,15 @@ class ATMSymbolGenerator:
             'strike_interval': 50,
             'lot_size': 60,
             'expiry_day': 1,  # Tuesday
-            'expiry_type': 'weekly'
+            'expiry_type': 'monthly'
         },
         'MIDCPNIFTY': {
             'spot_symbol': 'NSE:NIFTYMIDCAP50-INDEX',
             'option_prefix': 'MIDCPNIFTY',
             'strike_interval': 100,
             'lot_size': 50,
-            'expiry_day': 0,  # Monday
-            'expiry_type': 'weekly'
+            'expiry_day': 1,  # Tuesday
+            'expiry_type': 'monthly'
         }
     }
 
