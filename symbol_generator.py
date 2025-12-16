@@ -31,7 +31,7 @@ class ATMSymbolGenerator:
             'option_prefix': 'NIFTY',
             'strike_interval': 50,
             'lot_size': 50,
-            'expiry_day': 1,  # Thursday (0=Monday, 6=Sunday)
+            'expiry_day': 1,  # Tuesday (0=Monday, 6=Sunday)
             'expiry_type': 'weekly'  # weekly or monthly
         },
         'BANKNIFTY': {
@@ -176,7 +176,7 @@ class ATMSymbolGenerator:
             else:  # weekly
                 # Find next expiry day
                 days_ahead = expiry_day - today.weekday()
-                if days_ahead <= 0:  # Target day already happened this week
+                if days_ahead < 0:  # Target day already happened this week
                     days_ahead += 7
 
                 next_expiry = today + timedelta(days=days_ahead)

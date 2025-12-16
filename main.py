@@ -1632,7 +1632,7 @@ def main():
                 print("\n Generating ATM symbols automatically...")
                 SYMBOLS = symbol_manager.get_or_generate_symbols(
                     indices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'],
-                    num_strikes_otm=1,
+                    num_strikes_otm=0, # 0 - ATM only, 1 - ATM ±1, 2 - ATM ±2 - No. of options generation
                     force_regenerate=False
                 )
             else:
