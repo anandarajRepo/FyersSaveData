@@ -1,8 +1,8 @@
 # Symbol refresh at 8:00 AM on weekdays
-0 8 * * 1-5 /root/FyersSaveData/refresh_symbols.sh
+0 8 * * 1-5 /root/FyersSaveData/refresh_symbols.sh >> /var/log/savedata.log 2>&1
 
 # Start strategy at 8:55 AM on weekdays
-55 8 * * 1-5 /root/FyersSaveData/run_savedata.sh >> /var/log/savedata.log 2>&1
+50 8 * * 1-5 /root/FyersSaveData/run_savedata.sh >> /var/log/savedata.log 2>&1
 
 # Stop strategy at 3:30 PM every day
 30 15 * * 1-5 /root/FyersSaveData/stop_savedata.sh >> /var/log/savedata.log 2>&1

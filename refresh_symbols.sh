@@ -47,7 +47,7 @@ echo ""
 
 # Run symbol refresh
 echo "Generating ATM symbols..."
-python3 refresh_symbols.py \
+python3.11 refresh_symbols.py \
     --indices $INDICES \
     --otm-strikes $OTM_STRIKES \
     --output "$OUTPUT_FILE"
@@ -61,7 +61,7 @@ if [ $? -eq 0 ]; then
 
     # Display symbol count
     if [ -f "$OUTPUT_FILE" ]; then
-        SYMBOL_COUNT=$(python3 -c "import json; print(json.load(open('$OUTPUT_FILE'))['total_symbols'])" 2>/dev/null)
+        SYMBOL_COUNT=$(python3.11 -c "import json; print(json.load(open('$OUTPUT_FILE'))['total_symbols'])" 2>/dev/null)
         if [ -n "$SYMBOL_COUNT" ]; then
             echo "Generated $SYMBOL_COUNT symbols for today"
         fi
@@ -69,7 +69,7 @@ if [ $? -eq 0 ]; then
         # Display first few symbols as verification
         echo ""
         echo "Sample symbols:"
-        python3 -c "import json; data = json.load(open('$OUTPUT_FILE')); [print('  -', s) for s in data['symbols'][:8]]" 2>/dev/null
+        python3.11 -c "import json; data = json.load(open('$OUTPUT_FILE')); [print('  -', s) for s in data['symbols'][:8]]" 2>/dev/null
     fi
 
     echo ""
@@ -91,7 +91,7 @@ else
     echo "To fix authentication:"
     echo "  cd $SCRIPT_DIR"
     echo "  source venv/bin/activate"
-    echo "  python3 main.py auth"
+    echo "  python3.11 main.py auth"
 
     exit 1
 fi
