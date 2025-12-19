@@ -1671,10 +1671,10 @@ def main():
         for sym in SYMBOLS:
             print(f"   - {sym}")
 
-        confirm = input("\nStart streaming? (y/n) [y]: ").strip().lower()
-        if confirm == 'n':
-            print("️ Streaming cancelled")
-            return
+        # confirm = input("\nStart streaming? (y/n) [y]: ").strip().lower()
+        # if confirm == 'n':
+        #     print("️ Streaming cancelled")
+        #     return
 
         streamer = FyersDataStreamerV3(CLIENT_ID, access_token, db_manager)
 

@@ -5,6 +5,9 @@
 # Run this before market hours (recommended: 8:00 AM IST)
 #
 
+# Clear previous log
+truncate -s 0 /var/log/savedata.log
+
 # Script directory
 SCRIPT_DIR="/root/FyersSaveData"
 cd "$SCRIPT_DIR" || exit 1
