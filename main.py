@@ -1649,14 +1649,14 @@ def main():
                     SYMBOLS = []
 
         # Fallback to hardcoded symbols if generation failed
-        if not SYMBOLS:
-            print("\n️ Using fallback hardcoded symbols")
-            SYMBOLS = [
-                "NSE:NIFTY25D1226000CE",
-                "NSE:NIFTY25D1226000PE",
-                "NSE:BANKNIFTY25D1158000CE",
-                "NSE:BANKNIFTY25D1158000PE",
-            ]
+        # if not SYMBOLS:
+        #     print("\n️ Using fallback hardcoded symbols")
+        #     SYMBOLS = [
+        #         "NSE:NIFTY25D1226000CE",
+        #         "NSE:NIFTY25D1226000PE",
+        #         "NSE:BANKNIFTY25D1158000CE",
+        #         "NSE:BANKNIFTY25D1158000PE",
+        #     ]
 
         db_manager = DatabaseManager()
         current_db_path = db_manager.get_current_db_path()
