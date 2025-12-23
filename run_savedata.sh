@@ -1,3 +1,4 @@
+#!/bin/bash
 truncate -s 0 /var/log/savedata.log
 cd /root/FyersSaveData
 source venv/bin/activate
