@@ -25,11 +25,11 @@ from dotenv import load_dotenv
 
 # Import symbol generator (must be in same directory)
 try:
-    from utils.symbol_manager import SymbolManager
-    SYMBOL_MANAGER_AVAILABLE = True
+    from symbol_generator import ATMSymbolGenerator
+    SYMBOL_GENERATOR_AVAILABLE = True
 except ImportError:
-    SYMBOL_MANAGER_AVAILABLE = False
-    logging.warning("SymbolManager not available - auto symbol generation disabled")
+    SYMBOL_GENERATOR_AVAILABLE = False
+    logging.warning("symbol_generator.py not found - auto symbol generation disabled")
 
 # Load environment variables
 load_dotenv()
