@@ -149,42 +149,74 @@ class ATMSymbolGenerator:
             if not config:
                 return None
 
-            expiry_day = config['expiry_day']  # 0=Monday, 6=Sunday
             today = datetime.now()
 
+            # Get monthly expiry (last Thursday) for reference
+            monthly_expiry = self._get_monthly_expiry(today)
+
             if expiry_type == 'monthly':
-                # Monthly expiry is last Thursday of the month for NIFTY/BANKNIFTY
-                # Get last day of current month
-                last_day = calendar.monthrange(today.year, today.month)[1]
-                last_date = datetime(today.year, today.month, last_day)
-
-                # Find last Thursday
-                while last_date.weekday() != 3:  # 3 = Thursday
-                    last_date -= timedelta(days=1)
-
-                # If today is past monthly expiry, get next month's
-                if today > last_date:
-                    next_month = today.month + 1 if today.month < 12 else 1
-                    next_year = today.year if today.month < 12 else today.year + 1
-                    last_day = calendar.monthrange(next_year, next_month)[1]
-                    last_date = datetime(next_year, next_month, last_day)
-                    while last_date.weekday() != 3:
-                        last_date -= timedelta(days=1)
-
-                return last_date.replace(hour=15, minute=30, second=0, microsecond=0)
+                return monthly_expiry
 
             else:  # weekly
-                # Find next expiry day
+                expiry_day = config['expiry_day']  # 0=Monday, 1=Tuesday, etc.
+
+                # Find next weekly expiry day
                 days_ahead = expiry_day - today.weekday()
-                if days_ahead < 0:  # Target day already happened this week
+                if days_ahead <= 0:  # Target day already happened this week
                     days_ahead += 7
 
-                next_expiry = today + timedelta(days=days_ahead)
-                return next_expiry.replace(hour=15, minute=30, second=0, microsecond=0)
+                next_weekly_expiry = today + timedelta(days=days_ahead)
+                next_weekly_expiry = next_weekly_expiry.replace(hour=15, minute=30, second=0, microsecond=0)
+
+                # CRITICAL: For NIFTY weekly options, check if this week contains monthly expiry
+                if index_name == 'NIFTY':
+                    # If the upcoming Tuesday is in the same week as monthly expiry (last Thursday)
+                    # OR if the Tuesday comes after monthly expiry in the last week
+                    # Use the monthly expiry instead
+
+                    # Get the Monday of the week containing monthly expiry
+                    monthly_week_start = monthly_expiry - timedelta(days=monthly_expiry.weekday())
+                    monthly_week_end = monthly_week_start + timedelta(days=6)
+
+                    # Check if our weekly expiry falls in the monthly expiry week
+                    if monthly_week_start <= next_weekly_expiry <= monthly_week_end:
+                        logger.info(f"NIFTY weekly expiry {next_weekly_expiry.date()} falls in monthly expiry week - using monthly expiry {monthly_expiry.date()}")
+                        return monthly_expiry
+
+                return next_weekly_expiry
 
         except Exception as e:
             logger.error(f"Error calculating expiry date: {e}")
             return None
+
+    def _get_monthly_expiry(self, reference_date: datetime) -> datetime:
+        """
+        Calculate monthly expiry (last Thursday of the month)
+
+        Args:
+            reference_date: Reference date to calculate from
+
+        Returns:
+            Monthly expiry datetime
+        """
+        # Get last day of current month
+        last_day = calendar.monthrange(reference_date.year, reference_date.month)[1]
+        last_date = datetime(reference_date.year, reference_date.month, last_day)
+
+        # Find last Thursday
+        while last_date.weekday() != 1:  # 1 = Tuesday
+            last_date -= timedelta(days=1)
+
+        # If today is past monthly expiry, get next month's
+        if reference_date.date() > last_date.date():
+            next_month = reference_date.month + 1 if reference_date.month < 12 else 1
+            next_year = reference_date.year if reference_date.month < 12 else reference_date.year + 1
+            last_day = calendar.monthrange(next_year, next_month)[1]
+            last_date = datetime(next_year, next_month, last_day)
+            while last_date.weekday() != 3:
+                last_date -= timedelta(days=1)
+
+        return last_date.replace(hour=15, minute=30, second=0, microsecond=0)
 
     def format_symbol(self, index_name: str, expiry_date: datetime, strike: int, option_type: str) -> str:
         """
@@ -212,7 +244,7 @@ class ATMSymbolGenerator:
             # Check if it's monthly expiry (last Thursday of month)
             last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
             last_date = datetime(expiry_date.year, expiry_date.month, last_day)
-            while last_date.weekday() != 3:  # Find last Thursday
+            while last_date.weekday() != 1:  # Find last Tuesday
                 last_date -= timedelta(days=1)
 
             is_monthly = expiry_date.date() == last_date.date()
