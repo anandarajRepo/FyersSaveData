@@ -254,7 +254,13 @@ class ATMSymbolGenerator:
                 symbol = f"NSE:{prefix}{year}{month}{strike}{option_type}"
             else:
                 # Weekly format: NIFTY25D1226000CE
-                symbol = f"NSE:{prefix}{year}D{day}{strike}{option_type}"
+                # Single character month mapping for weekly expiries
+                month_char_map = {
+                    1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6',
+                    7: '7', 8: '8', 9: '9', 10: 'O', 11: 'N', 12: 'D'
+                }
+                month_char = month_char_map[expiry_date.month]
+                symbol = f"NSE:{prefix}{year}{month_char}{day}{strike}{option_type}"
 
             return symbol
 
