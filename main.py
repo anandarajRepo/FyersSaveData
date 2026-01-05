@@ -46,6 +46,13 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Favorite stocks for tick data collection
+FAVORITE_SYMBOLS = [
+    "NSE:STLNETWORK-EQ",
+    "NSE:STLTECH-EQ",
+    "NSE:SKYGOLD-EQ",
+]
+
 
 class DatabaseManager:
     """Manages daily database files and operations"""
@@ -1030,9 +1037,8 @@ class FyersDataStreamerV3:
 class SymbolManager:
     """Manages symbol generation and persistence"""
 
-    def __init__(self, symbols_file: str = "daily_symbols.json", favorites_file: str = "favorite_symbols.json"):
+    def __init__(self, symbols_file: str = "daily_symbols.json"):
         self.symbols_file = symbols_file
-        self.favorites_file = favorites_file
         self.generator = None
 
     def initialize_generator(self, client_id: str, access_token: str):
@@ -1135,26 +1141,11 @@ class SymbolManager:
             return None
 
     def load_favorite_symbols(self) -> List[str]:
-        """Load favorite symbols from configuration file"""
-        try:
-            if not os.path.exists(self.favorites_file):
-                logger.info(f"No favorite symbols file found at {self.favorites_file}")
-                return []
-
-            with open(self.favorites_file, 'r') as f:
-                data = json.load(f)
-
-            if not data.get('enabled', True):
-                logger.info("Favorite symbols are disabled")
-                return []
-
-            symbols = list(data.get('symbols', {}).values())
-            logger.info(f"Loaded {len(symbols)} favorite symbols: {symbols}")
-            return symbols
-
-        except Exception as e:
-            logger.error(f"Error loading favorite symbols: {e}")
-            return []
+        """Load favorite symbols from global FAVORITE_SYMBOLS constant"""
+        if FAVORITE_SYMBOLS:
+            logger.info(f"Loaded {len(FAVORITE_SYMBOLS)} favorite symbols: {FAVORITE_SYMBOLS}")
+            return FAVORITE_SYMBOLS.copy()
+        return []
 
     def get_or_generate_symbols(
         self,

@@ -1,9 +1,0 @@
-{
-  "description": "User's favorite stocks for tick data collection",
-  "symbols": {
-    "STLNETWORK": "NSE:STLNETWORK-EQ",
-    "STLTECH": "NSE:STLTECH-EQ",
-    "SKYGOLD": "NSE:SKYGOLD-EQ"
-  },
-  "enabled": true
-}
