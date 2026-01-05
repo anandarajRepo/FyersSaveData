@@ -1030,8 +1030,9 @@ class FyersDataStreamerV3:
 class SymbolManager:
     """Manages symbol generation and persistence"""
 
-    def __init__(self, symbols_file: str = "daily_symbols.json"):
+    def __init__(self, symbols_file: str = "daily_symbols.json", favorites_file: str = "favorite_symbols.json"):
         self.symbols_file = symbols_file
+        self.favorites_file = favorites_file
         self.generator = None
 
     def initialize_generator(self, client_id: str, access_token: str):
@@ -1133,20 +1134,66 @@ class SymbolManager:
             logger.error(f"Error loading symbols from file: {e}")
             return None
 
+    def load_favorite_symbols(self) -> List[str]:
+        """Load favorite symbols from configuration file"""
+        try:
+            if not os.path.exists(self.favorites_file):
+                logger.info(f"No favorite symbols file found at {self.favorites_file}")
+                return []
+
+            with open(self.favorites_file, 'r') as f:
+                data = json.load(f)
+
+            if not data.get('enabled', True):
+                logger.info("Favorite symbols are disabled")
+                return []
+
+            symbols = list(data.get('symbols', {}).values())
+            logger.info(f"Loaded {len(symbols)} favorite symbols: {symbols}")
+            return symbols
+
+        except Exception as e:
+            logger.error(f"Error loading favorite symbols: {e}")
+            return []
+
     def get_or_generate_symbols(
         self,
         indices: List[str] = None,
         num_strikes_otm: int = 1,
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
+        include_favorites: bool = True
     ) -> List[str]:
-        """Get symbols - load from file if available for today, otherwise generate"""
+        """Get symbols - load from file if available for today, otherwise generate
+
+        Args:
+            indices: List of indices to generate symbols for
+            num_strikes_otm: Number of strikes OTM to include
+            force_regenerate: Force regeneration even if today's symbols exist
+            include_favorites: Include favorite symbols from configuration
+
+        Returns:
+            Combined list of generated and favorite symbols
+        """
+        symbols = []
+
+        # Load or generate option symbols
         if not force_regenerate:
             symbols = self.load_symbols_from_file()
-            if symbols:
-                return symbols
+            if not symbols:
+                logger.info("Generating new symbols...")
+                symbols = self.generate_daily_symbols(indices, num_strikes_otm)
+        else:
+            logger.info("Generating new symbols...")
+            symbols = self.generate_daily_symbols(indices, num_strikes_otm)
 
-        logger.info("Generating new symbols...")
-        return self.generate_daily_symbols(indices, num_strikes_otm)
+        # Add favorite symbols if enabled
+        if include_favorites:
+            favorite_symbols = self.load_favorite_symbols()
+            if favorite_symbols:
+                symbols.extend(favorite_symbols)
+                logger.info(f"Total symbols (including favorites): {len(symbols)}")
+
+        return symbols
 
 
 def setup_authentication():
@@ -1638,6 +1685,10 @@ def main():
             else:
                 print("\n Symbol generator not available, using manual symbols")
                 SYMBOLS = []
+                # Load favorite symbols as fallback
+                favorite_symbols = symbol_manager.load_favorite_symbols()
+                if favorite_symbols:
+                    SYMBOLS.extend(favorite_symbols)
         else:
             SYMBOLS = symbol_manager.load_symbols_from_file()
             if not SYMBOLS:
@@ -1647,6 +1698,11 @@ def main():
                     SYMBOLS = symbol_manager.generate_daily_symbols()
                 else:
                     SYMBOLS = []
+
+            # Always add favorite symbols when using saved symbols
+            favorite_symbols = symbol_manager.load_favorite_symbols()
+            if favorite_symbols:
+                SYMBOLS.extend(favorite_symbols)
 
         # Fallback to hardcoded symbols if generation failed
         # if not SYMBOLS:
